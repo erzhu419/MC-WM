@@ -184,13 +184,31 @@ def train(env_fn, env_cls, label, gap_fn=None, penalty_scale=0.1,
 
 
 def main():
-    log(f"Device: {DEVICE}")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3"])
+    args = parser.parse_args()
+    mode = args.mode
+
+    global LOG
+    LOG = f"/tmp/mvp_qdelta_{mode}.log"
+
+    def log_local(msg=""):
+        print(msg, flush=True)
+        with open(LOG, "a") as f:
+            f.write(str(msg) + "\n")
+
+    # Monkey-patch module-level log
+    global log
+    log = log_local
+
+    log(f"[{mode}] Device: {DEVICE}")
     log("Architecture: SINDy as OOD detector → QΔ penalty on Q-target")
 
     env_cls = CarpetAntEnv
 
-    # Paired data + SINDy ensemble (for gap detection, NOT correction)
-    log("\n[A] SINDy Ensemble (gap detector, not corrector)")
+    # Paired data + SINDy ensemble
+    log("\n[A] SINDy Ensemble (gap detector)")
     SA, delta_s, real_trans, n_eps = collect_paired(env_cls, N_COLLECT)
     log(f"  {len(SA)} paired steps ({n_eps} eps)")
     obs_dim = delta_s.shape[1]
@@ -199,54 +217,30 @@ def main():
     corrector.fit(SA, delta_s)
     gap_fn = make_gap_fn(corrector)
 
-    # Verify gap signal: should be high for vel dims, ~0 for non-vel dims
     test_gap = gap_fn(SA[:100, :obs_dim], SA[:100, obs_dim:])
-    log(f"  Gap signal on training data: mean={test_gap.mean():.4f} std={test_gap.std():.4f}")
+    log(f"  Gap signal: mean={test_gap.mean():.4f} std={test_gap.std():.4f}")
 
-    # Condition 1: Raw Sim (no QΔ, baseline)
-    c1 = train(lambda: env_cls(mode="sim"), env_cls, "Raw Sim (baseline)")
+    RAW_SIM_BASELINE = 951.6
 
-    # Condition 2: Raw Sim + QΔ (SINDy gap detection)
-    c2 = train(lambda: env_cls(mode="sim"), env_cls, "Raw Sim + QΔ",
-               gap_fn=gap_fn, penalty_scale=PENALTY_SCALE)
+    if mode == "c1":
+        curve = train(lambda: env_cls(mode="sim"), env_cls, "Raw Sim (baseline)")
+    elif mode == "c2":
+        curve = train(lambda: env_cls(mode="sim"), env_cls, "Raw Sim + QΔ",
+                      gap_fn=gap_fn, penalty_scale=PENALTY_SCALE)
+    elif mode == "c3":
+        curve = train(lambda: env_cls(mode="sim"), env_cls, "Raw Sim + QΔ + MixBuf",
+                      gap_fn=gap_fn, penalty_scale=PENALTY_SCALE, real_data=real_trans)
 
-    # Condition 3: Raw Sim + QΔ + MixedBuffer
-    c3 = train(lambda: env_cls(mode="sim"), env_cls, "Raw Sim + QΔ + MixBuf",
-               gap_fn=gap_fn, penalty_scale=PENALTY_SCALE, real_data=real_trans)
-
-    # Summary
-    log(f"\n{'='*60}")
-    log("FINAL RESULTS (last 3 avg, real env)")
-    log(f"{'='*60}")
-    results = {}
-    for name, c in [("Raw Sim", c1), ("RawSim+QΔ", c2), ("RawSim+QΔ+MixBuf", c3)]:
-        avg = np.mean([r for _, r in c[-3:]])
-        results[name] = avg
-        log(f"  {name:25s}: {avg:7.1f}")
-
-    r1, r2, r3 = results["Raw Sim"], results["RawSim+QΔ"], results["RawSim+QΔ+MixBuf"]
-    log(f"\n  QΔ vs Raw Sim:           {(r2-r1)/max(abs(r1),1)*100:+.1f}%")
-    log(f"  QΔ+MixBuf vs Raw Sim:    {(r3-r1)/max(abs(r1),1)*100:+.1f}%")
-
-    if (r2 - r1) / max(abs(r1), 1) * 100 > 10:
-        log(">>> SOLID — QΔ works!")
-    elif (r2 - r1) / max(abs(r1), 1) * 100 > 0:
-        log(">>> POSITIVE — QΔ adds marginal value")
-    else:
-        log(">>> NEGATIVE — need to tune penalty_scale or gap signal")
-
-    # Plot
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for name, c, color in [("Raw Sim", c1, "steelblue"),
-                            ("RawSim+QΔ", c2, "darkorange"),
-                            ("RawSim+QΔ+MixBuf", c3, "forestgreen")]:
-        steps, rets = zip(*c)
-        ax.plot(steps, rets, label=name, color=color, lw=2)
-    ax.set_xlabel("Steps"); ax.set_ylabel("Real env return")
-    ax.set_title("CarpetAnt: QΔ (Residual Bellman) MVP")
-    ax.legend(); ax.grid(alpha=0.3); plt.tight_layout()
-    plt.savefig(os.path.join(OUT_DIR, "mvp_qdelta.png"), dpi=100); plt.close()
-    log(f"Plot → mvp_qdelta.png")
+    avg = np.mean([r for _, r in curve[-3:]])
+    gap = (avg - RAW_SIM_BASELINE) / RAW_SIM_BASELINE * 100
+    log(f"\n{'='*50}")
+    log(f"Baseline (Raw Sim v1): {RAW_SIM_BASELINE:.1f}")
+    log(f"{mode} result:          {avg:.1f}")
+    log(f"Gap: {gap:+.1f}%")
+    if gap > 10: log(">>> SOLID")
+    elif gap > 0: log(">>> POSITIVE")
+    else: log(">>> NEGATIVE")
+    log(f"{'='*50}")
 
 
 if __name__ == "__main__":
