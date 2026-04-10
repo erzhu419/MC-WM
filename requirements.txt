@@ -1,0 +1,13 @@
+torch>=2.0
+numpy>=1.24
+pysindy>=1.7
+statsmodels>=0.14
+asteval>=0.9.31
+gymnasium>=0.29
+mujoco>=3.0
+scipy>=1.11
+matplotlib>=3.7
+# offline RL baseline
+# pip install git+https://github.com/corl-team/CORL.git
+# optional LLM oracle (not required for core system)
+# anthropic>=0.25

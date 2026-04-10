@@ -1,0 +1,26 @@
+=== SINDy Coverage Report (灰犀牛风险检验) ===
+
+correction_ratio      : 1.1857
+  (0=没修正任何东西, 1=修正量与真实残差等量)
+RMSE raw sim          : 0.10386
+RMSE corrected sim    : 0.04450
+RMSE reduction        : 57.2%
+
+每个 dim 的 SINDy 拟合 MSE:
+  dim  0: 0.00000
+  dim  1: 0.00000
+  dim  2: 0.00000
+  dim  3: 0.00000
+  dim  4: 0.00000
+  dim  5: 0.00000
+  dim  6: 0.00000
+  dim  7: 0.00000
+  dim  8: 0.00000
+  dim  9: 0.00001
+  dim 10: 0.00008
+  dim 11: 0.00326
+  dim 12: 0.00599
+  dim 13: 0.00633
+  dim 14: 0.00604
+  dim 15: 0.00728
+  dim 16: 0.00467

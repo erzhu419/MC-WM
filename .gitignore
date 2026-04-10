@@ -1,0 +1,29 @@
+# Exclude from repo
+reference/
+CSR/
+Factored_Nonstationary_RL/
+*.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Logs and outputs
+*.log
+*.png
+*.sbx
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+.codex/
+texput.log
+*.Zone.Identifier
+final decision
