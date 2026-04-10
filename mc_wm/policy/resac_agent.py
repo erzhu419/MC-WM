@@ -208,6 +208,7 @@ class RESACAgent:
         self.gap_fn = None
         self.q_delta = None
         self.use_direct_gap = False
+        self.penalty_scale = penalty_scale
         if hasattr(gap_fn, 'get_penalty'):
             # Pre-trained QΔ module
             self.q_delta = gap_fn
