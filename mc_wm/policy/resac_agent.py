@@ -147,6 +147,12 @@ class RESACAgent:
         beta_ood   : OOD penalty on Q_std (原版默认 0.01)
         beta_bc    : behavior cloning weight (原版默认 0.001)
         critic_actor_ratio : critic 每 N 步 actor 更新一次 (原版默认 2)
+
+    QΔ integration (optional):
+        gap_fn     : callable(s_np, a_np) → gap_reward (np.ndarray, shape (N,))
+                     SINDy-based dynamics gap detector. If provided, enables
+                     QΔ (Residual Bellman) penalty on Q-targets.
+        penalty_scale : weight of QΔ penalty on Q-target (default 0.1)
     """
 
     def __init__(
@@ -166,6 +172,8 @@ class RESACAgent:
         alpha_init: float = 0.2,
         max_alpha: float = 0.6,
         device: str = DEVICE,
+        gap_fn=None,
+        penalty_scale: float = 0.1,
     ):
         self.gamma = gamma
         self.tau   = tau
@@ -191,6 +199,17 @@ class RESACAgent:
         self.opt_actor  = optim.Adam(self.actor.parameters(),  lr=lr)
         self.opt_alpha  = optim.Adam([self.log_alpha], lr=lr)
 
+        # QΔ: dynamics gap penalty (optional)
+        self.gap_fn = gap_fn
+        self.q_delta = None
+        if gap_fn is not None:
+            from mc_wm.policy.q_delta import QDeltaModule
+            self.q_delta = QDeltaModule(
+                obs_dim, act_dim, hidden_dim=128, lr=lr,
+                gamma=gamma, tau=tau, penalty_scale=penalty_scale,
+                device=device,
+            )
+
     @property
     def alpha(self):
         return min(self.max_alpha, self.log_alpha.exp().item())
@@ -204,6 +223,18 @@ class RESACAgent:
         alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
         self.opt_alpha.zero_grad(); alpha_loss.backward(); self.opt_alpha.step()
 
+        # ── QΔ update (if gap_fn provided)
+        q_delta_loss = 0.0
+        if self.q_delta is not None and self.gap_fn is not None:
+            # Compute gap reward: r_Δ = ||Δ̂(s,a)||²
+            with torch.no_grad():
+                s_np = s.cpu().numpy()
+                a_np = a.cpu().numpy()
+                gap_np = self.gap_fn(s_np, a_np)  # (B,)
+                gap_reward = torch.FloatTensor(gap_np).unsqueeze(-1).to(self.device)
+                a2_delta, _, _ = self.actor.evaluate(s2)
+            q_delta_loss = self.q_delta.update(s, a, s2, a2_delta, d, gap_reward)
+
         # ── Critic update
         with torch.no_grad():
             a2, lp2, _ = self.actor.evaluate(s2)
@@ -211,6 +242,11 @@ class RESACAgent:
             # 用最小 Q（悲观）作为 target（类似 TD3）
             q_next_min = q_next.min(0).values       # (B,)
             q_tgt = r.squeeze(-1) + self.gamma * (1 - d.squeeze(-1)) * (q_next_min - self.alpha * lp2)
+
+            # QΔ penalty: penalize Q-target in high-gap regions
+            if self.q_delta is not None:
+                penalty = self.q_delta.get_penalty(s, a).squeeze(-1)  # (B,)
+                q_tgt = q_tgt - penalty
 
         q_pred = self.critic(s, a)                 # (N, B)
         q_tgt_exp = q_tgt.unsqueeze(0).expand_as(q_pred)
@@ -225,12 +261,9 @@ class RESACAgent:
             q_mean = q_dist.mean(0)
             q_std  = q_dist.std(0)
 
-            # LCB + entropy：
-            #   -(Q_mean + β*Q_std) 是 L1-LCB（std 线性进入 loss），
-            #   单独用时 policy 可能在低 std 区域无限变尖；
-            #   加上 +α*log_π 的 SAC 熵项充当 floor，防止分布坍缩。
+            # LCB + entropy
             policy_loss = -(q_mean + self.beta * q_std - self.alpha * lp_new).mean()
-            # BC 正则（轻微向离线数据靠拢）
+            # BC 正则
             bc_loss = F.mse_loss(a_new, a)
             actor_loss = policy_loss + self.beta_bc * bc_loss
 
