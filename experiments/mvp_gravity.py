@@ -36,7 +36,7 @@ N_CRITICS    = 3
 BETA_LCB     = -2.0
 HIDDEN       = 256
 LR           = 3e-4
-PENALTY_SCALE = 1.0   # gap normalized to [0,1], penalty = 0~1.0 per step
+PENALTY_SCALE = 0.1   # w_min: highest-gap transitions keep 10% learning weight
 
 
 class ReplayBuffer:
@@ -155,8 +155,8 @@ def train(env_fn, env_cls, label, log_fn, gap_fn=None, penalty_scale=0.3, seed=S
             # Aggregate diagnostics from last interval
             diag_str = ""
             if diag_history:
-                keys = ["critic_loss", "q_pred_mean", "q_tgt_mean", "q_tgt_raw_mean",
-                         "penalty_mean", "penalty_max", "q_tgt_shift",
+                keys = ["critic_loss", "q_pred_mean", "q_tgt_mean",
+                         "iw_mean", "iw_min", "iw_reduction",
                          "gap_mean", "gap_std", "alpha"]
                 avg = {}
                 for k in keys:
@@ -168,12 +168,10 @@ def train(env_fn, env_cls, label, log_fn, gap_fn=None, penalty_scale=0.3, seed=S
                     parts.append(f"crit={avg['critic_loss']:.1f}")
                 if "q_pred_mean" in avg:
                     parts.append(f"Q={avg['q_pred_mean']:.0f}")
-                if "q_tgt_raw_mean" in avg and "q_tgt_mean" in avg:
-                    parts.append(f"Qtgt={avg['q_tgt_raw_mean']:.0f}→{avg['q_tgt_mean']:.0f}")
-                if "penalty_mean" in avg:
-                    parts.append(f"pen={avg['penalty_mean']:.2f}±{avg.get('penalty_max',0):.2f}")
-                if "q_tgt_shift" in avg:
-                    parts.append(f"shift={avg['q_tgt_shift']:.2f}")
+                if "iw_mean" in avg:
+                    parts.append(f"w={avg['iw_mean']:.3f}[{avg.get('iw_min',0):.3f}]")
+                if "iw_reduction" in avg:
+                    parts.append(f"reduct={avg['iw_reduction']:.1%}")
                 if "gap_mean" in avg:
                     parts.append(f"gap={avg['gap_mean']:.2f}[{avg.get('gap_std',0):.2f}]")
                 diag_str = "  " + " | ".join(parts)

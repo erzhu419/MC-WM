@@ -236,29 +236,42 @@ class RESACAgent:
             q_next = self.critic_tgt(s2, a2)       # (N, B)
             q_next_min = q_next.min(0).values       # (B,)
             q_tgt_raw = r.squeeze(-1) + self.gamma * (1 - d.squeeze(-1)) * (q_next_min - self.alpha * lp2)
+            q_tgt = q_tgt_raw
 
-            # Gap penalty on Q-target
-            penalty_val = None
-            gap_raw = None
-            if self.use_direct_gap and self.gap_fn is not None:
+        # Compute per-transition importance weight from gap signal
+        gap_raw = None
+        iw_weights = None  # importance weights (B,)
+        if self.use_direct_gap and self.gap_fn is not None:
+            with torch.no_grad():
                 s_np = s.cpu().numpy(); a_np = a.cpu().numpy()
-                gap_np = self.gap_fn(s_np, a_np)  # (B,)
+                gap_np = self.gap_fn(s_np, a_np)  # (B,) — rank-preserving, [0,1] normalized
                 gap_raw = gap_np.copy()
-                penalty = torch.FloatTensor(gap_np).to(self.device) * self.penalty_scale
-                penalty = torch.clamp(penalty, 0.0, 5.0)
-                penalty_val = penalty
-                q_tgt = q_tgt_raw - penalty
-            elif self.q_delta is not None:
-                penalty = self.q_delta.get_penalty(s, a).squeeze(-1)
-                penalty_val = penalty
-                q_tgt = q_tgt_raw - penalty
-            else:
-                q_tgt = q_tgt_raw
+                gap_t = torch.FloatTensor(gap_np).to(self.device)
+                # Multiplicative: w = w_min + (1 - w_min) * (1 - gap)
+                # gap=0 (no gap) → w=1.0 (full weight)
+                # gap=1 (max gap) → w=w_min (reduced weight)
+                w_min = self.penalty_scale  # reuse penalty_scale as w_min
+                iw_weights = w_min + (1.0 - w_min) * (1.0 - gap_t)  # (B,) in [w_min, 1.0]
+        elif self.q_delta is not None:
+            with torch.no_grad():
+                qd_val = self.q_delta.q_delta(s, a).mean(0).squeeze(-1)  # (B,)
+                # Normalize QΔ to [0, 1] via sigmoid
+                gap_norm = torch.sigmoid(qd_val - qd_val.mean())
+                w_min = self.penalty_scale
+                iw_weights = w_min + (1.0 - w_min) * (1.0 - gap_norm)
 
         q_pred = self.critic(s, a)                 # (N, B)
         q_tgt_exp = q_tgt.unsqueeze(0).expand_as(q_pred)
         ood_loss = q_pred.std(0).mean()
-        critic_loss = F.mse_loss(q_pred, q_tgt_exp.detach()) + self.beta_ood * ood_loss
+
+        if iw_weights is not None:
+            # Weighted MSE: high-gap transitions get lower learning weight
+            iw_exp = iw_weights.unsqueeze(0).expand_as(q_pred)  # (N, B)
+            td_err = (q_pred - q_tgt_exp.detach()) ** 2         # (N, B)
+            critic_loss = (iw_exp * td_err).mean() + self.beta_ood * ood_loss
+        else:
+            critic_loss = F.mse_loss(q_pred, q_tgt_exp.detach()) + self.beta_ood * ood_loss
+
         self.opt_critic.zero_grad(); critic_loss.backward(); self.opt_critic.step()
 
         # ── Actor update（每 critic_actor_ratio 步一次）
@@ -290,11 +303,12 @@ class RESACAgent:
             "q_tgt_mean": float(q_tgt.mean()),
             "q_tgt_raw_mean": float(q_tgt_raw.mean()),
         }
-        if penalty_val is not None:
-            diag["penalty_mean"] = float(penalty_val.mean())
-            diag["penalty_max"] = float(penalty_val.max())
-            diag["penalty_std"] = float(penalty_val.std())
-            diag["q_tgt_shift"] = float((q_tgt_raw - q_tgt).mean())  # how much penalty moved Q
+        if iw_weights is not None:
+            diag["iw_mean"] = float(iw_weights.mean())
+            diag["iw_min"] = float(iw_weights.min())
+            diag["iw_std"] = float(iw_weights.std())
+            # Effective learning rate reduction
+            diag["iw_reduction"] = float(1.0 - iw_weights.mean())
         if gap_raw is not None:
             diag["gap_mean"] = float(gap_raw.mean())
             diag["gap_std"] = float(gap_raw.std())
