@@ -36,7 +36,7 @@ N_CRITICS    = 3
 BETA_LCB     = -2.0
 HIDDEN       = 256
 LR           = 3e-4
-PENALTY_SCALE = 0.5   # gap is now clamped to p95, safe to be higher
+PENALTY_SCALE = 1.0   # gap normalized to [0,1], penalty = 0~1.0 per step
 
 
 class ReplayBuffer:
@@ -73,25 +73,35 @@ def collect_paired(env_cls, n_steps, seed=SEED):
     return SA, delta_s, delta_r, ep
 
 
-def make_gap_fn(corrector, SA_train):
+def make_gap_fn(corrector, SA_train, log_fn=print):
     """
-    Gap signal clamped to training distribution range.
-    Prevents SINDy OOD predictions from blowing up the penalty.
+    Normalized gap signal: z-score based on training distribution, then sigmoid.
+
+    Fixes three issues from diagnostics:
+    1. OOD magnitude explosion (gap/true ratio up to 13x) → clamp + normalize
+    2. Absolute magnitude not meaningful → relative to training dist
+    3. Rank order preserved (ρ=0.80) → normalization keeps rank
+
+    Output: gap in [0, 1] where 0=no gap (training avg), 1=extreme gap
     """
-    # Calibrate: compute gap signal on training data
     delta_train = corrector.predict_batch(SA_train)
     train_gap = np.mean(delta_train ** 2, axis=-1)
-    gap_p95 = float(np.percentile(train_gap, 95))
     gap_mean = float(train_gap.mean())
-    print(f"  Gap calibration: mean={gap_mean:.4f} p95={gap_p95:.4f} (clamp max)")
+    gap_std = float(train_gap.std())
+    gap_p95 = float(np.percentile(train_gap, 95))
+    log_fn(f"  Gap calibration: mean={gap_mean:.4f} std={gap_std:.4f} p95={gap_p95:.4f}")
 
     def gap_fn(s_batch, a_batch):
         SA = np.concatenate([s_batch, a_batch], axis=-1).astype(np.float32)
         delta_pred = corrector.predict_batch(SA)
-        gap = np.mean(delta_pred ** 2, axis=-1)
-        # Clamp to training distribution p95 — OOD predictions capped
-        gap = np.clip(gap, 0, gap_p95)
-        return gap
+        gap_raw = np.mean(delta_pred ** 2, axis=-1)
+        # Normalize: z-score relative to training distribution
+        gap_z = (gap_raw - gap_mean) / max(gap_std, 1e-8)
+        # Clamp z-score to [-2, 3] — cap OOD explosion
+        gap_z = np.clip(gap_z, -2.0, 3.0)
+        # Shift to [0, 1]: z=-2 → 0, z=3 → 1
+        gap_norm = (gap_z + 2.0) / 5.0
+        return gap_norm
     return gap_fn
 
 
