@@ -36,7 +36,7 @@ N_CRITICS    = 3
 BETA_LCB     = -2.0
 HIDDEN       = 256
 LR           = 3e-4
-PENALTY_SCALE = 0.3
+PENALTY_SCALE = 0.5   # gap is now clamped to p95, safe to be higher
 
 
 class ReplayBuffer:
@@ -73,11 +73,25 @@ def collect_paired(env_cls, n_steps, seed=SEED):
     return SA, delta_s, delta_r, ep
 
 
-def make_gap_fn(corrector):
+def make_gap_fn(corrector, SA_train):
+    """
+    Gap signal clamped to training distribution range.
+    Prevents SINDy OOD predictions from blowing up the penalty.
+    """
+    # Calibrate: compute gap signal on training data
+    delta_train = corrector.predict_batch(SA_train)
+    train_gap = np.mean(delta_train ** 2, axis=-1)
+    gap_p95 = float(np.percentile(train_gap, 95))
+    gap_mean = float(train_gap.mean())
+    print(f"  Gap calibration: mean={gap_mean:.4f} p95={gap_p95:.4f} (clamp max)")
+
     def gap_fn(s_batch, a_batch):
         SA = np.concatenate([s_batch, a_batch], axis=-1).astype(np.float32)
         delta_pred = corrector.predict_batch(SA)
-        return np.mean(delta_pred ** 2, axis=-1)
+        gap = np.mean(delta_pred ** 2, axis=-1)
+        # Clamp to training distribution p95 — OOD predictions capped
+        gap = np.clip(gap, 0, gap_p95)
+        return gap
     return gap_fn
 
 
@@ -195,7 +209,7 @@ def main():
         cov = corrector.correction_coverage(SA, delta_s)
         log_fn(f"  RMSE reduction: {cov['rmse_reduction_pct']:.1f}%")
 
-        gap_fn = make_gap_fn(corrector)
+        gap_fn = make_gap_fn(corrector, SA)
         test_gap = gap_fn(SA[:200, :obs_dim], SA[:200, obs_dim:])
         log_fn(f"  Gap signal: mean={test_gap.mean():.4f} std={test_gap.std():.4f} "
                f"min={test_gap.min():.4f} max={test_gap.max():.4f}")
