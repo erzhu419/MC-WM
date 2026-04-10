@@ -165,6 +165,11 @@ def train(env_fn, env_cls, label, gap_fn=None, penalty_scale=0.1,
     log(f"\n[{label}] {TRAIN_STEPS//1000}k steps" +
         (f" | QΔ penalty={penalty_scale}" if gap_fn else ""))
 
+    # Diagnostic accumulators
+    diag_gap_rewards = []
+    diag_q_penalties = []
+    diag_q_targets = []
+
     for step in range(1, TRAIN_STEPS+1):
         a = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
         obs2, r, d, tr, _ = env.step(a)
@@ -174,10 +179,32 @@ def train(env_fn, env_cls, label, gap_fn=None, penalty_scale=0.1,
         if step >= WARMUP and buf.size >= BATCH_SIZE:
             agent.update(buf)
 
+            # Collect QΔ diagnostics every step (lightweight)
+            if agent.q_delta is not None and step % 100 == 0:
+                with torch.no_grad():
+                    s_sample, a_sample, _, _, _ = buf.sample(64)
+                    # Gap reward (SINDy signal)
+                    s_np = s_sample.cpu().numpy(); a_np = a_sample.cpu().numpy()
+                    gap_r = gap_fn(s_np, a_np) if gap_fn else np.zeros(64)
+                    diag_gap_rewards.append(float(gap_r.mean()))
+                    # QΔ prediction
+                    qd = agent.q_delta.q_delta(s_sample, a_sample).squeeze(-1)
+                    diag_q_penalties.append(float(qd.mean()))
+
         if step % EVAL_INTERVAL == 0:
             ret, std = evaluate(agent, env_cls)
             curve.append((step, ret))
-            log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}")
+            # Step-level diagnostic summary
+            diag_str = ""
+            if diag_gap_rewards:
+                gr_mean = np.mean(diag_gap_rewards[-50:])  # last 50 samples
+                qp_mean = np.mean(diag_q_penalties[-50:]) if diag_q_penalties else 0
+                penalty_applied = qp_mean * penalty_scale
+                diag_str = (f"  gap_r={gr_mean:.3f} QΔ={qp_mean:.3f} "
+                           f"penalty={penalty_applied:.3f}")
+                diag_gap_rewards.clear()
+                diag_q_penalties.clear()
+            log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}{diag_str}")
 
     env.close()
     return curve
