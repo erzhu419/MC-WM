@@ -200,12 +200,17 @@ class RESACAgent:
         self.opt_alpha  = optim.Adam([self.log_alpha], lr=lr)
 
         # QΔ: dynamics gap penalty (optional)
+        # Can be provided as pre-trained module, or created from gap_fn
         self.gap_fn = gap_fn
         self.q_delta = None
-        if gap_fn is not None:
+        if isinstance(gap_fn, object) and hasattr(gap_fn, 'get_penalty'):
+            # Pre-trained QΔ module passed directly
+            self.q_delta = gap_fn
+            self.gap_fn = None  # no online gap computation needed
+        elif callable(gap_fn):
             from mc_wm.policy.q_delta import QDeltaModule
             self.q_delta = QDeltaModule(
-                obs_dim, act_dim, hidden_dim=128, lr=lr,
+                obs_dim, act_dim, hidden_dim=128, K=3, lr=lr,
                 gamma=gamma, tau=tau, penalty_scale=penalty_scale,
                 device=device,
             )

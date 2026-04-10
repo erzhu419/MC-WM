@@ -78,18 +78,14 @@ def run_trajectory(sim, real, policy_fn, corrector, q_delta, train_center, n_ste
         # True residual
         delta_true = ns_r - ns_s
 
-        # Ensemble prediction — get ALL model predictions
+        # Ensemble prediction
         SA_1 = np.concatenate([os_s, a]).reshape(1, -1).astype(np.float32)
         Theta = corrector._get_theta(SA_1)
-        per_model = np.zeros((5, obs_dim))
-        for k, model in enumerate(corrector.models):
-            preds = model.predict_ensemble(Theta)  # (K, 1)
-            per_model[k, :] = 0  # init
-        # Actually use predict_with_uncertainty for clean API
         delta_pred, stds, gate = corrector.predict_with_uncertainty(os_s, a)
 
-        # Per-model predictions (each of K=5 models)
-        per_model_all = np.zeros((5, obs_dim))
+        # Per-model predictions: K=5 bootstrap models × obs_dim dimensions
+        K = corrector.K
+        per_model_all = np.zeros((K, obs_dim))
         for dim_i, model in enumerate(corrector.models):
             preds_k = model.predict_ensemble(Theta)  # (K, 1) for this dim
             per_model_all[:, dim_i] = preds_k[:, 0]
