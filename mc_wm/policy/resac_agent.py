@@ -199,21 +199,22 @@ class RESACAgent:
         self.opt_actor  = optim.Adam(self.actor.parameters(),  lr=lr)
         self.opt_alpha  = optim.Adam([self.log_alpha], lr=lr)
 
-        # QΔ: dynamics gap penalty (optional)
-        # Can be provided as pre-trained module, or created from gap_fn
-        self.gap_fn = gap_fn
+        # Dynamics gap penalty (optional)
+        # gap_fn: callable(s_np, a_np) → gap per transition (N,)
+        # Three modes:
+        #   1. gap_fn=None → no penalty (baseline)
+        #   2. gap_fn=callable → direct per-step penalty (method 1, recommended)
+        #   3. gap_fn=QDeltaModule → pre-trained QΔ (method 2, Bellman accumulation)
+        self.gap_fn = None
         self.q_delta = None
-        if isinstance(gap_fn, object) and hasattr(gap_fn, 'get_penalty'):
-            # Pre-trained QΔ module passed directly
+        self.use_direct_gap = False
+        if hasattr(gap_fn, 'get_penalty'):
+            # Pre-trained QΔ module
             self.q_delta = gap_fn
-            self.gap_fn = None  # no online gap computation needed
         elif callable(gap_fn):
-            from mc_wm.policy.q_delta import QDeltaModule
-            self.q_delta = QDeltaModule(
-                obs_dim, act_dim, hidden_dim=128, K=3, lr=lr,
-                gamma=gamma, tau=tau, penalty_scale=penalty_scale,
-                device=device,
-            )
+            # Direct gap function — per-step penalty, no Bellman
+            self.gap_fn = gap_fn
+            self.use_direct_gap = True
 
     @property
     def alpha(self):
@@ -228,18 +229,6 @@ class RESACAgent:
         alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
         self.opt_alpha.zero_grad(); alpha_loss.backward(); self.opt_alpha.step()
 
-        # ── QΔ update (if gap_fn provided)
-        q_delta_loss = 0.0
-        if self.q_delta is not None and self.gap_fn is not None:
-            # Compute gap reward: r_Δ = ||Δ̂(s,a)||²
-            with torch.no_grad():
-                s_np = s.cpu().numpy()
-                a_np = a.cpu().numpy()
-                gap_np = self.gap_fn(s_np, a_np)  # (B,)
-                gap_reward = torch.FloatTensor(gap_np).unsqueeze(-1).to(self.device)
-                a2_delta, _, _ = self.actor.evaluate(s2)
-            q_delta_loss = self.q_delta.update(s, a, s2, a2_delta, d, gap_reward)
-
         # ── Critic update
         with torch.no_grad():
             a2, lp2, _ = self.actor.evaluate(s2)
@@ -248,9 +237,17 @@ class RESACAgent:
             q_next_min = q_next.min(0).values       # (B,)
             q_tgt = r.squeeze(-1) + self.gamma * (1 - d.squeeze(-1)) * (q_next_min - self.alpha * lp2)
 
-            # QΔ penalty: penalize Q-target in high-gap regions
-            if self.q_delta is not None:
-                penalty = self.q_delta.get_penalty(s, a).squeeze(-1)  # (B,)
+            # Gap penalty on Q-target
+            if self.use_direct_gap and self.gap_fn is not None:
+                # Method 1: direct per-step SINDy gap → preserves spatial variation
+                s_np = s.cpu().numpy(); a_np = a.cpu().numpy()
+                gap_np = self.gap_fn(s_np, a_np)  # (B,)
+                penalty = torch.FloatTensor(gap_np).to(self.device) * self.penalty_scale
+                penalty = torch.clamp(penalty, 0.0, 5.0)  # safety clamp
+                q_tgt = q_tgt - penalty
+            elif self.q_delta is not None:
+                # Method 2: QΔ Bellman accumulation
+                penalty = self.q_delta.get_penalty(s, a).squeeze(-1)
                 q_tgt = q_tgt - penalty
 
         q_pred = self.critic(s, a)                 # (N, B)
