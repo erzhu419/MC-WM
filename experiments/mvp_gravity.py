@@ -106,7 +106,8 @@ def train(env_fn, env_cls, label, log_fn, gap_fn=None, penalty_scale=0.3, seed=S
 
     buf = ReplayBuffer(od, ad, REPLAY_SIZE)
     obs, _ = env.reset(seed=seed); curve = []
-    gap_vals = []
+    # Diagnostic accumulators
+    diag_history = []
 
     log_fn(f"\n[{label}] {TRAIN_STEPS//1000}k steps" +
            (f" | pen_scale={penalty_scale}" if gap_fn else ""))
@@ -115,25 +116,46 @@ def train(env_fn, env_cls, label, log_fn, gap_fn=None, penalty_scale=0.3, seed=S
         a = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
         obs2, r, d, tr, _ = env.step(a)
         buf.add(obs, a, r, obs2, float(d and not tr))
-
-        if gap_fn is not None and step % 100 == 0:
-            gap_vals.append(gap_fn(obs.reshape(1,-1), a.reshape(1,-1))[0])
-
         obs = obs2
         if d or tr: obs, _ = env.reset()
         if step >= WARMUP and buf.size >= BATCH_SIZE:
-            agent.update(buf)
+            update_diag = agent.update(buf)
+            if step % 200 == 0:
+                diag_history.append(update_diag)
 
         if step % EVAL_INTERVAL == 0:
             ret_real, std_real = evaluate(agent, env_cls, "real")
             ret_sim, _ = evaluate(agent, env_cls, "sim")
             curve.append((step, ret_real, ret_sim))
-            diag = ""
-            if gap_vals:
-                gm = np.mean(gap_vals[-50:]); gs = np.std(gap_vals[-50:])
-                diag = f"  gap={gm:.3f}±{gs:.3f} pen={gm*penalty_scale:.3f}"
-                gap_vals.clear()
-            log_fn(f"  step {step:>6d} | real={ret_real:7.1f}±{std_real:4.0f}  sim={ret_sim:7.1f}{diag}")
+
+            # Aggregate diagnostics from last interval
+            diag_str = ""
+            if diag_history:
+                keys = ["critic_loss", "q_pred_mean", "q_tgt_mean", "q_tgt_raw_mean",
+                         "penalty_mean", "penalty_max", "q_tgt_shift",
+                         "gap_mean", "gap_std", "alpha"]
+                avg = {}
+                for k in keys:
+                    vals = [d[k] for d in diag_history if k in d]
+                    if vals: avg[k] = np.mean(vals)
+
+                parts = []
+                if "critic_loss" in avg:
+                    parts.append(f"crit={avg['critic_loss']:.1f}")
+                if "q_pred_mean" in avg:
+                    parts.append(f"Q={avg['q_pred_mean']:.0f}")
+                if "q_tgt_raw_mean" in avg and "q_tgt_mean" in avg:
+                    parts.append(f"Qtgt={avg['q_tgt_raw_mean']:.0f}→{avg['q_tgt_mean']:.0f}")
+                if "penalty_mean" in avg:
+                    parts.append(f"pen={avg['penalty_mean']:.2f}±{avg.get('penalty_max',0):.2f}")
+                if "q_tgt_shift" in avg:
+                    parts.append(f"shift={avg['q_tgt_shift']:.2f}")
+                if "gap_mean" in avg:
+                    parts.append(f"gap={avg['gap_mean']:.2f}[{avg.get('gap_std',0):.2f}]")
+                diag_str = "  " + " | ".join(parts)
+                diag_history.clear()
+
+            log_fn(f"  step {step:>6d} | real={ret_real:7.1f}±{std_real:4.0f}  sim={ret_sim:7.1f}{diag_str}")
 
     env.close()
     return curve

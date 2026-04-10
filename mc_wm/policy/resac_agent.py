@@ -234,22 +234,26 @@ class RESACAgent:
         with torch.no_grad():
             a2, lp2, _ = self.actor.evaluate(s2)
             q_next = self.critic_tgt(s2, a2)       # (N, B)
-            # 用最小 Q（悲观）作为 target（类似 TD3）
             q_next_min = q_next.min(0).values       # (B,)
-            q_tgt = r.squeeze(-1) + self.gamma * (1 - d.squeeze(-1)) * (q_next_min - self.alpha * lp2)
+            q_tgt_raw = r.squeeze(-1) + self.gamma * (1 - d.squeeze(-1)) * (q_next_min - self.alpha * lp2)
 
             # Gap penalty on Q-target
+            penalty_val = None
+            gap_raw = None
             if self.use_direct_gap and self.gap_fn is not None:
-                # Method 1: direct per-step SINDy gap → preserves spatial variation
                 s_np = s.cpu().numpy(); a_np = a.cpu().numpy()
                 gap_np = self.gap_fn(s_np, a_np)  # (B,)
+                gap_raw = gap_np.copy()
                 penalty = torch.FloatTensor(gap_np).to(self.device) * self.penalty_scale
-                penalty = torch.clamp(penalty, 0.0, 5.0)  # safety clamp
-                q_tgt = q_tgt - penalty
+                penalty = torch.clamp(penalty, 0.0, 5.0)
+                penalty_val = penalty
+                q_tgt = q_tgt_raw - penalty
             elif self.q_delta is not None:
-                # Method 2: QΔ Bellman accumulation
                 penalty = self.q_delta.get_penalty(s, a).squeeze(-1)
-                q_tgt = q_tgt - penalty
+                penalty_val = penalty
+                q_tgt = q_tgt_raw - penalty
+            else:
+                q_tgt = q_tgt_raw
 
         q_pred = self.critic(s, a)                 # (N, B)
         q_tgt_exp = q_tgt.unsqueeze(0).expand_as(q_pred)
@@ -258,25 +262,46 @@ class RESACAgent:
         self.opt_critic.zero_grad(); critic_loss.backward(); self.opt_critic.step()
 
         # ── Actor update（每 critic_actor_ratio 步一次）
+        actor_loss_val = 0.0
         if self._update_count % self.critic_actor_ratio == 0:
             a_new, lp_new, _ = self.actor.evaluate(s)
             q_dist = self.critic(s, a_new)          # (N, B)
             q_mean = q_dist.mean(0)
             q_std  = q_dist.std(0)
 
-            # LCB + entropy
             policy_loss = -(q_mean + self.beta * q_std - self.alpha * lp_new).mean()
-            # BC 正则
             bc_loss = F.mse_loss(a_new, a)
             actor_loss = policy_loss + self.beta_bc * bc_loss
+            actor_loss_val = float(actor_loss)
 
             self.opt_actor.zero_grad(); actor_loss.backward(); self.opt_actor.step()
 
-            # Soft target update
             for p, pt in zip(self.critic.parameters(), self.critic_tgt.parameters()):
                 pt.data.mul_(1 - self.tau); pt.data.add_(self.tau * p.data)
 
-        return float(critic_loss), float(alpha_loss)
+        # ── Build diagnostics dict
+        diag = {
+            "critic_loss": float(critic_loss),
+            "alpha_loss": float(alpha_loss),
+            "actor_loss": actor_loss_val,
+            "alpha": self.alpha,
+            "q_pred_mean": float(q_pred.mean()),
+            "q_pred_std": float(q_pred.std(0).mean()),
+            "q_tgt_mean": float(q_tgt.mean()),
+            "q_tgt_raw_mean": float(q_tgt_raw.mean()),
+        }
+        if penalty_val is not None:
+            diag["penalty_mean"] = float(penalty_val.mean())
+            diag["penalty_max"] = float(penalty_val.max())
+            diag["penalty_std"] = float(penalty_val.std())
+            diag["q_tgt_shift"] = float((q_tgt_raw - q_tgt).mean())  # how much penalty moved Q
+        if gap_raw is not None:
+            diag["gap_mean"] = float(gap_raw.mean())
+            diag["gap_std"] = float(gap_raw.std())
+            diag["gap_max"] = float(gap_raw.max())
+            diag["gap_min"] = float(gap_raw.min())
+
+        return diag
 
     def get_action(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         return self.actor.get_action(obs, deterministic)
