@@ -70,26 +70,21 @@ def collect_initial_paired(env_cls, n_steps, seed=SEED):
     return np.array(SA_list, np.float32), np.array(ds_list, np.float32), ep
 
 
-def collect_online_paired(env_cls, replay_buffer, n_samples, seed_offset=10000):
-    """Collect paired data at states from the replay buffer (on-policy distribution)."""
+def collect_online_paired(env_cls, agent, n_steps, seed_offset=10000):
+    """
+    Collect paired data using current policy in lockstep sim+real.
+    Uses the TRAINED policy (not random), so data covers the policy's actual distribution.
+    """
     sim = env_cls(mode="sim"); real = env_cls(mode="real")
-    n = min(n_samples, replay_buffer.size)
-    idx = np.random.randint(0, replay_buffer.size, n)
-    SA_new, ds_new = [], []
-
-    for i in idx:
-        s = replay_buffer.s[i]
-        a = replay_buffer.a[i]
-        # Reset both envs, step with same action from same-ish state
-        # (Can't set_state perfectly, so use reset + short rollout as proxy)
-        os_s, _ = sim.reset(seed=int(i) + seed_offset)
-        os_r, _ = real.reset(seed=int(i) + seed_offset)
-        # Use the stored action
-        ns_s, _, _, _, _ = sim.step(a)
-        ns_r, _, _, _, _ = real.step(a)
-        SA_new.append(np.concatenate([os_s, a]))
-        ds_new.append(ns_r - ns_s)
-
+    os_s, _ = sim.reset(seed=seed_offset); os_r, _ = real.reset(seed=seed_offset)
+    SA_new, ds_new = [], []; ep = 0
+    for _ in range(n_steps):
+        a = agent.get_action(os_s, deterministic=False)
+        ns_s, _, ds, ts, _ = sim.step(a); ns_r, _, dr, tr, _ = real.step(a)
+        SA_new.append(np.concatenate([os_s, a])); ds_new.append(ns_r - ns_s)
+        os_s, os_r = ns_s, ns_r
+        if ds or ts or dr or tr:
+            ep += 1; os_s, _ = sim.reset(seed=seed_offset+ep); os_r, _ = real.reset(seed=seed_offset+ep)
     sim.close(); real.close()
     return np.array(SA_new, np.float32), np.array(ds_new, np.float32)
 
@@ -162,7 +157,7 @@ def main():
         obs_dim = delta_s.shape[1]; act_dim = env_cls.ACT_DIM
         log_fn("\n[B] Fitting confident residual model (K=5)...")
         residual = ConfidentResidualModel(obs_dim, act_dim, K=5, hidden=128,
-                                          confidence_tau=0.1, device=DEVICE)
+                                          confidence_tau=0.91, device=DEVICE)
         residual.fit(SA, delta_s, n_epochs=100)
 
         # Test confidence on training data
@@ -201,7 +196,7 @@ def main():
             # Online refit: collect new paired data + re-train residual
             if step > WARMUP and step % REFIT_INTERVAL == 0:
                 log_fn(f"  [REFIT at step {step}] Collecting {REFIT_SAMPLES} on-policy paired samples...")
-                SA_new, ds_new = collect_online_paired(env_cls, buf, REFIT_SAMPLES,
+                SA_new, ds_new = collect_online_paired(env_cls, agent, REFIT_SAMPLES,
                                                        seed_offset=step)
                 residual.add_paired_data(SA_new, ds_new)
                 residual.refit(n_epochs=50)
