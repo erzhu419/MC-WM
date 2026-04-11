@@ -55,3 +55,27 @@ c2=2129 in first run was lucky seed (second run: 960.7).
 Gap signal has insufficient spatial variation at training time.
 gap std=0.20 in range [0.7, 1.0] — all transitions look "high gap".
 Need gap signal with wider dynamic range, or fundamentally different approach.
+
+---
+
+## Attempt 2/8: MLP Ensemble Gap Detector
+
+**Hypothesis**: SINDy poly2 explodes OOD. MLP with tanh has bounded output → better gap signal.
+
+**Result**:
+| Condition | Last 3 avg (real) |
+|-----------|-------------------|
+| c1 Raw Sim | 809.8 |
+| c4 Uniform w=0.25 | **950.8 (+17.4%)** |
+| c5 MLP gap IW | 766.0 (-5.4%) |
+
+**Status**: FAILED. MLP gap signal also lacks spatial variation (mean=0.64, std=0.15).
+MLP weight stabilized at 0.42 (vs SINDy dropping to 0.17) — tanh works for stability.
+But spatial discrimination is still zero. c4 uniform wins again.
+
+**Consistent finding across attempts**: uniform LR reduction gives +7-17%. Gap-dependent methods add nothing or hurt.
+
+**Root cause confirmed**: 3000 steps of random policy paired data cannot support ANY gap detector.
+All states visited by trained policy are OOD for the gap detector. Gap signal → constant → uniform weight.
+
+**Remaining 6 attempts should address data coverage, not gap detector architecture.**
