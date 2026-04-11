@@ -39,4 +39,19 @@ where w = w_min + (1-w_min)*(1-gap_normalized), w_min=0.1
 **Concern**: Is this IW or just reduced learning rate effect?
 Need ablation: uniform w=0.17 (same avg weight, no gap signal) vs gap-dependent w.
 
-**Status**: POSITIVE signal but needs confirmation.
+**Status**: FALSE POSITIVE. Ablation shows improvement is from reduced LR, not gap signal.
+
+### Ablation (same run, different seed):
+| Condition | Last 3 avg (real) |
+|-----------|-------------------|
+| c1 Raw Sim (w=1.0) | 933.0 |
+| c4 Uniform w=0.25 | **1002.6 (+7.5%)** |
+| c2 Gap-dependent w | 960.7 (+3.0%) |
+
+c4 > c2. Gap signal provides no additional value beyond uniform LR reduction.
+c2=2129 in first run was lucky seed (second run: 960.7).
+
+### Root cause:
+Gap signal has insufficient spatial variation at training time.
+gap std=0.20 in range [0.7, 1.0] — all transitions look "high gap".
+Need gap signal with wider dynamic range, or fundamentally different approach.
