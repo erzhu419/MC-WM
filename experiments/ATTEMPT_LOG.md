@@ -79,3 +79,35 @@ But spatial discrimination is still zero. c4 uniform wins again.
 All states visited by trained policy are OOD for the gap detector. Gap signal → constant → uniform weight.
 
 **Remaining 6 attempts should address data coverage, not gap detector architecture.**
+
+---
+
+## Attempt 3/8: Confident Residual + Online Refit + Actor Constraint
+
+**Method**: MLP ensemble (K=5, τ=0.91) + confidence-based IW + actor constraint + online refit every 5k steps
+
+**Result**:
+
+| Condition | Last 3 avg (real) |
+|-----------|-------------------|
+| c1 Raw Sim | 864.2 |
+| c2 Confident+Refit+Constraint | 716.3 (-17.1%) |
+
+**Status**: FAILED.
+
+**Diagnostics**:
+- Weight stable at 0.85 [min=0.72], 15% reduction — mild, no blowup
+- Confidence declining: 0.62 → 0.53 → 0.52 → 0.51 → 0.50 (refit doesn't help)
+- Actor constraint (penalty_scale=0.5) restricts exploration → lower returns
+- Sim suppressed (1489 vs 3199) but real doesn't benefit
+
+**Why it failed**:
+1. Online refit doesn't improve confidence — policy outruns the gap detector
+2. Actor constraint punishes exploration of necessary high-return regions
+3. 15% weight reduction is weaker than the proven 25% uniform (which gives +17%)
+
+**Accumulated evidence (3 attempts)**:
+- Uniform LR reduction: +7-17% consistently
+- Gap-dependent IW: 0% or negative (SINDy, MLP, or confidence — all fail)
+- Online refit: doesn't close the coverage gap fast enough
+- Actor constraint: hurts more than helps
