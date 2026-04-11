@@ -21,6 +21,7 @@ import torch
 from mc_wm.envs.hp_mujoco.gravity_cheetah import GravityCheetahEnv
 from mc_wm.policy.resac_agent import RESACAgent
 from mc_wm.residual.sindy_ensemble import SINDyEnsembleCorrector
+from mc_wm.residual.mlp_gap_detector import MLPGapDetector
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
@@ -185,7 +186,7 @@ def train(env_fn, env_cls, label, log_fn, gap_fn=None, penalty_scale=0.3, seed=S
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -232,15 +233,38 @@ def main():
                       "Real Online (upper bound)", log_fn)
 
     elif mode == "c4":
-        # Ablation: uniform weight = 0.17 (same avg as c2 end, no gap signal)
-        # If c4 ≈ c2 → improvement is just reduced LR, not gap detection
-        # If c4 << c2 → gap signal provides real value
+        # Ablation: uniform weight (no gap signal)
         def uniform_gap_fn(s_batch, a_batch):
-            # Returns constant 0.83 → w = 0.1 + 0.9*(1-0.83) = 0.253 ≈ c2 average
             return np.full(len(s_batch), 0.83)
         curve = train(lambda: env_cls(mode="sim"), env_cls,
                       "Uniform w=0.25 (ablation)", log_fn,
                       gap_fn=uniform_gap_fn, penalty_scale=PENALTY_SCALE)
+
+    elif mode == "c5":
+        # MLP ensemble gap detector (replaces SINDy)
+        # tanh activation → bounded predictions, no OOD explosion
+        # ensemble disagreement → natural uncertainty signal
+        log_fn("\n[A] Paired data + MLP ensemble gap detector")
+        SA, delta_s, delta_r, n_eps = collect_paired(env_cls, N_COLLECT)
+        log_fn(f"  {len(SA)} steps ({n_eps} eps)")
+        log_fn(f"  State gap: mean={np.abs(delta_s).mean():.4f}")
+        log_fn(f"  Reward gap: mean={np.abs(delta_r).mean():.4f}")
+
+        obs_dim = delta_s.shape[1]
+        detector = MLPGapDetector(obs_dim, env_cls.ACT_DIM, K=5, hidden=128, device=DEVICE)
+        detector.fit(SA, delta_s, n_epochs=100)
+        cov = detector.correction_coverage(SA, delta_s)
+        log_fn(f"  RMSE reduction: {cov['rmse_reduction_pct']:.1f}%")
+
+        # Test gap signal distribution
+        gap_fn = detector.make_gap_fn(alpha=0.5)
+        test_gap = gap_fn(SA[:200, :obs_dim], SA[:200, obs_dim:])
+        log_fn(f"  Gap signal: mean={test_gap.mean():.4f} std={test_gap.std():.4f} "
+               f"min={test_gap.min():.4f} max={test_gap.max():.4f}")
+
+        curve = train(lambda: env_cls(mode="sim"), env_cls,
+                      "MLP gap IW", log_fn,
+                      gap_fn=gap_fn, penalty_scale=PENALTY_SCALE)
 
     # Summary
     avg_real = np.mean([r for _, r, _ in curve[-3:]])
