@@ -185,7 +185,7 @@ def train(env_fn, env_cls, label, log_fn, gap_fn=None, penalty_scale=0.3, seed=S
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -230,6 +230,17 @@ def main():
         # Upper bound: train directly in real env
         curve = train(lambda: env_cls(mode="real"), env_cls,
                       "Real Online (upper bound)", log_fn)
+
+    elif mode == "c4":
+        # Ablation: uniform weight = 0.17 (same avg as c2 end, no gap signal)
+        # If c4 ≈ c2 → improvement is just reduced LR, not gap detection
+        # If c4 << c2 → gap signal provides real value
+        def uniform_gap_fn(s_batch, a_batch):
+            # Returns constant 0.83 → w = 0.1 + 0.9*(1-0.83) = 0.253 ≈ c2 average
+            return np.full(len(s_batch), 0.83)
+        curve = train(lambda: env_cls(mode="sim"), env_cls,
+                      "Uniform w=0.25 (ablation)", log_fn,
+                      gap_fn=uniform_gap_fn, penalty_scale=PENALTY_SCALE)
 
     # Summary
     avg_real = np.mean([r for _, r, _ in curve[-3:]])
