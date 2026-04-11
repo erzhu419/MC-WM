@@ -276,6 +276,7 @@ class RESACAgent:
 
         # ── Actor update（每 critic_actor_ratio 步一次）
         actor_loss_val = 0.0
+        confidence_penalty_val = 0.0
         if self._update_count % self.critic_actor_ratio == 0:
             a_new, lp_new, _ = self.actor.evaluate(s)
             q_dist = self.critic(s, a_new)          # (N, B)
@@ -285,6 +286,20 @@ class RESACAgent:
             policy_loss = -(q_mean + self.beta * q_std - self.alpha * lp_new).mean()
             bc_loss = F.mse_loss(a_new, a)
             actor_loss = policy_loss + self.beta_bc * bc_loss
+
+            # Confidence constraint on actor: penalize exploring low-confidence regions
+            # gap_fn returns 1-confidence, so high gap = low confidence
+            if self.use_direct_gap and self.gap_fn is not None:
+                with torch.no_grad():
+                    s_np_actor = s.cpu().numpy()
+                    a_np_actor = a_new.detach().cpu().numpy()
+                    gap_actor = self.gap_fn(s_np_actor, a_np_actor)
+                # Penalize actor for proposing actions in low-confidence regions
+                # This is a soft constraint: don't go where we can't trust the sim
+                confidence_penalty = torch.FloatTensor(gap_actor).to(self.device).mean()
+                actor_loss = actor_loss + self.penalty_scale * confidence_penalty
+                confidence_penalty_val = float(confidence_penalty)
+
             actor_loss_val = float(actor_loss)
 
             self.opt_actor.zero_grad(); actor_loss.backward(); self.opt_actor.step()
@@ -307,8 +322,9 @@ class RESACAgent:
             diag["iw_mean"] = float(iw_weights.mean())
             diag["iw_min"] = float(iw_weights.min())
             diag["iw_std"] = float(iw_weights.std())
-            # Effective learning rate reduction
             diag["iw_reduction"] = float(1.0 - iw_weights.mean())
+        if confidence_penalty_val > 0:
+            diag["conf_penalty"] = confidence_penalty_val
         if gap_raw is not None:
             diag["gap_mean"] = float(gap_raw.mean())
             diag["gap_std"] = float(gap_raw.std())
