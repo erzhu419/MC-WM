@@ -27,3 +27,5 @@ build/
 texput.log
 *.Zone.Identifier
 final decision
+ResWorld/
+experiments/diag_data/
