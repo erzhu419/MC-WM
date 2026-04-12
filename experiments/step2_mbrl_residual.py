@@ -229,10 +229,17 @@ def main():
             f"model_buf_max={MODEL_BUF_MAX}, rollout_freq={ROLLOUT_FREQ}")
 
         for step in range(1, TRAIN_STEPS+1):
-            # Real env interaction (always — this is the ground truth)
+            # Sim env interaction for exploration (collect states/actions)
             a = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
-            obs2, r, d, tr, _ = env.step(a)
-            env_buf.add(obs, a, r, obs2, float(d and not tr))
+            obs2, r_sim, d, tr, _ = env.step(a)
+
+            # Relabel reward through M_real: use corrected model's reward prediction
+            # This eliminates sim/real reward conflict
+            _, r_corrected = corrected_model.predict(
+                obs.reshape(1, -1), a.reshape(1, -1), deterministic=True)
+            r_use = float(r_corrected[0])
+
+            env_buf.add(obs, a, r_use, obs2, float(d and not tr))
             obs = obs2
             if d or tr: obs, _ = env.reset()
 
@@ -240,7 +247,6 @@ def main():
                 # Generate single-step imagined rollouts periodically
                 if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
-                    # Single-step: just predict one transition per start state
                     actions = np.array([agent.get_action(s, deterministic=False)
                                        for s in start_states])
                     ns_pred, r_pred = corrected_model.predict(
@@ -250,7 +256,7 @@ def main():
                         r_pred.reshape(-1, 1), ns_pred,
                         np.zeros((ROLLOUT_BATCH, 1), np.float32))
 
-                # Train: 1 update on env data, 1 on model data (50:50)
+                # Train on both buffers (both have M_real-consistent rewards)
                 agent.update(env_buf)
                 if model_buf.size >= BATCH_SIZE:
                     agent.update(model_buf)
@@ -259,7 +265,7 @@ def main():
                 ret, std = evaluate(agent, env_cls)
                 curve.append((step, ret))
 
-                # Model quality diagnostic: predict on recent env transitions
+                # Diagnostics
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
@@ -267,11 +273,12 @@ def main():
                         env_buf.s[idx], env_buf.a[idx], deterministic=True)
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
                     r_err = np.sqrt(np.mean((r_test - env_buf.r[idx].squeeze()) ** 2))
-                    disagree = corrected_model.wm.get_disagreement(env_buf.s[idx], env_buf.a[idx]).mean()
-                    diag = f"  m_err_s={s_err:.3f} m_err_r={r_err:.3f} disagree={disagree:.3f}"
+                    disagree = corrected_model.wm.get_disagreement(
+                        env_buf.s[idx], env_buf.a[idx]).mean()
+                    diag = f"  m_s={s_err:.3f} m_r={r_err:.3f} dis={disagree:.3f}"
 
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
-                    f"env={env_buf.size} model={model_buf.size}{diag}")
+                    f"env={env_buf.size} mdl={model_buf.size}{diag}")
 
         env.close()
 
