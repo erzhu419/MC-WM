@@ -128,7 +128,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -371,6 +371,151 @@ def main():
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
+
+    elif mode == "c5":
+        # ── THE PAPER EXPERIMENT: Sim env + residual-corrected world model
+        #
+        # Like c4 but:
+        # - Interact in SIM env (not real)
+        # - World model = M_sim + residual δ (corrected to real dynamics)
+        # - Periodically collect small batches of PAIRED data to refit δ
+        # - Policy trains on mix of sim env_buf + corrected model rollouts
+        #
+        # This is the sim-to-real scenario: only sim is cheap, real is expensive.
+        # We use a small real data budget (3k initial + 500 per refit) to correct
+        # the world model, then train policy mostly in sim + corrected model.
+        np.random.seed(SEED); torch.manual_seed(SEED)
+
+        # Phase 1: Train M_sim on sim data
+        log(f"\n[Phase 1] Collecting {N_SIM_PRETRAIN//1000}k sim transitions + training M_sim...")
+        s_sim, a_sim, r_sim_arr, s2_sim, d_sim, ep_sim = collect_transitions(
+            env_cls, "sim", N_SIM_PRETRAIN)
+        log(f"  {len(s_sim)} sim transitions, {ep_sim} episodes")
+
+        wm_sim = WorldModelEnsemble(obs_dim, act_dim, K=5, hidden=200, device=DEVICE)
+        wm_sim.fit(s_sim, a_sim, s2_sim, r_sim_arr, n_epochs=100, patience=20)
+        ns_pred, r_pred = wm_sim.predict(s_sim[:1000], a_sim[:1000], deterministic=True)
+        sim_rmse = np.sqrt(np.mean((ns_pred - s2_sim[:1000]) ** 2))
+        log(f"  M_sim RMSE on sim: {sim_rmse:.4f}")
+
+        # Phase 2: Collect initial paired data + train residual
+        log(f"\n[Phase 2] Collecting {N_PAIRED} paired transitions + training residual...")
+        paired = collect_paired(env_cls, N_PAIRED)
+        log(f"  {len(paired['s'])} paired, state gap={np.abs(paired['ns_real']-paired['ns_sim']).mean():.4f}")
+
+        wm_sim.freeze()
+        residual = ResidualAdapter(obs_dim, act_dim, hidden=64, device=DEVICE)
+        residual.fit(paired['s'], paired['a'],
+                     paired['ns_sim'], paired['r_sim'],
+                     paired['ns_real'], paired['r_real'],
+                     n_epochs=200, patience=30)
+        corrected = CorrectedWorldModel(wm_sim, residual)
+
+        # Validate M_real
+        ns_rp, r_rp = corrected.predict(paired['s'][:500], paired['a'][:500], deterministic=True)
+        corr_rmse = np.sqrt(np.mean((ns_rp - paired['ns_real'][:500]) ** 2))
+        raw_gap = np.sqrt(np.mean((paired['ns_sim'][:500] - paired['ns_real'][:500]) ** 2))
+        log(f"  M_real RMSE: {corr_rmse:.4f} (raw gap: {raw_gap:.4f}, "
+            f"correction: {(1-corr_rmse/raw_gap)*100:.1f}%)")
+
+        # Phase 3: MBPO in sim env with corrected model rollouts
+        env = env_cls(mode="sim")
+        al = float(env.action_space.high[0])
+        agent = RESACAgent(obs_dim, act_dim, al, hidden_dim=HIDDEN, n_critics=N_CRITICS,
+                           beta=BETA_LCB, lr=LR, device=DEVICE)
+        env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)
+        model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+
+        # Accumulated paired data for residual refit
+        paired_s = list(paired['s'])
+        paired_a = list(paired['a'])
+        paired_ns_sim = list(paired['ns_sim'])
+        paired_ns_real = list(paired['ns_real'])
+        paired_r_sim = list(paired['r_sim'])
+        paired_r_real = list(paired['r_real'])
+
+        obs, _ = env.reset(seed=SEED); curve = []
+        RESIDUAL_REFIT_FREQ = 5000   # refit residual every N steps
+        RESIDUAL_REFIT_SAMPLES = 500 # new paired samples per refit
+
+        log(f"\n[Phase 3: c5 Sim + Corrected Model MBPO] {TRAIN_STEPS//1000}k steps")
+        log(f"  horizon={ROLLOUT_HORIZON}, residual refit every {RESIDUAL_REFIT_FREQ} steps")
+        log(f"  Interact in SIM, rollouts from M_real = M_sim + δ")
+
+        for step in range(1, TRAIN_STEPS+1):
+            # Interact in SIM env
+            a_act = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
+            obs2, r_env, d_flag, tr, _ = env.step(a_act)
+            env_buf.add(obs, a_act, r_env, obs2, float(d_flag and not tr))
+            obs = obs2
+            if d_flag or tr: obs, _ = env.reset()
+
+            # Periodically refit residual with new paired data
+            if step > WARMUP and step % RESIDUAL_REFIT_FREQ == 0:
+                log(f"  [REFIT δ step {step}] Collecting {RESIDUAL_REFIT_SAMPLES} paired samples...")
+                # Use current policy to collect paired data
+                new_paired = collect_paired(env_cls, RESIDUAL_REFIT_SAMPLES,
+                    policy_fn=lambda s: agent.get_action(s, deterministic=False),
+                    seed=step)
+                # Append to accumulated paired data
+                paired_s.extend(new_paired['s'])
+                paired_a.extend(new_paired['a'])
+                paired_ns_sim.extend(new_paired['ns_sim'])
+                paired_ns_real.extend(new_paired['ns_real'])
+                paired_r_sim.extend(new_paired['r_sim'])
+                paired_r_real.extend(new_paired['r_real'])
+                # Keep last 10k paired samples
+                max_paired = 10000
+                if len(paired_s) > max_paired:
+                    paired_s = paired_s[-max_paired:]
+                    paired_a = paired_a[-max_paired:]
+                    paired_ns_sim = paired_ns_sim[-max_paired:]
+                    paired_ns_real = paired_ns_real[-max_paired:]
+                    paired_r_sim = paired_r_sim[-max_paired:]
+                    paired_r_real = paired_r_real[-max_paired:]
+                # Refit residual
+                residual = ResidualAdapter(obs_dim, act_dim, hidden=64, device=DEVICE)
+                residual.fit(
+                    np.array(paired_s, np.float32), np.array(paired_a, np.float32),
+                    np.array(paired_ns_sim, np.float32), np.array(paired_r_sim, np.float32),
+                    np.array(paired_ns_real, np.float32), np.array(paired_r_real, np.float32),
+                    n_epochs=50, patience=15)
+                corrected = CorrectedWorldModel(wm_sim, residual)
+                # Clear stale model rollouts
+                model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+                log(f"    Paired data: {len(paired_s)} total")
+
+            if step >= WARMUP and env_buf.size >= BATCH_SIZE:
+                # Generate corrected model rollouts
+                if step % ROLLOUT_FREQ == 0:
+                    start_states = env_buf.sample_states(ROLLOUT_BATCH)
+                    actions = np.array([agent.get_action(ss, deterministic=False)
+                                       for ss in start_states])
+                    ns_pred, r_pred = corrected.predict(
+                        start_states, actions, deterministic=False)
+                    model_buf.add_batch(
+                        start_states, actions,
+                        r_pred.reshape(-1, 1), ns_pred,
+                        np.zeros((ROLLOUT_BATCH, 1), np.float32))
+
+                # MBPO: train on env_buf + model_buf
+                agent.update(env_buf)
+                if model_buf.size >= BATCH_SIZE:
+                    agent.update(model_buf)
+
+            if step % EVAL_INTERVAL == 0:
+                ret, std = evaluate(agent, env_cls)
+                curve.append((step, ret))
+                diag = ""
+                if env_buf.size >= 500:
+                    idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
+                    ns_test, r_test = corrected.predict(
+                        env_buf.s[idx], env_buf.a[idx], deterministic=True)
+                    s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
+                    diag = f"  m_s={s_err:.3f} paired={len(paired_s)}"
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                    f"env={env_buf.size} mdl={model_buf.size}{diag}")
+        env.close()
 
     # Summary
     avg = np.mean([r for _, r in curve[-3:]])
