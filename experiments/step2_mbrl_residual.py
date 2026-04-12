@@ -301,26 +301,46 @@ def main():
         dummy_res = ResidualAdapter(obs_dim, act_dim, device=DEVICE)
         direct_model = CorrectedWorldModel(wm_real, dummy_res)
 
-        # Phase 2: Dyna-style training (same as c3 but with accurate model)
-        env = env_cls(mode="sim")  # still explore in sim
-        al = float(env.action_space.high[0])
+        # Phase 2: MBPO-style training with online model refit
+        # Key difference: refit M_real every MODEL_TRAIN_FREQ steps using
+        # REAL env transitions collected online
+        env_real = env_cls(mode="real")  # interact in REAL env (both are simulators)
+        al = float(env_real.action_space.high[0])
         agent = RESACAgent(obs_dim, act_dim, al, hidden_dim=HIDDEN, n_critics=N_CRITICS,
                            beta=BETA_LCB, lr=LR, device=DEVICE)
         env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)
         model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
-        obs, _ = env.reset(seed=SEED); curve = []
-        log(f"\n[Phase 2: c4 Direct M_real rollouts] {TRAIN_STEPS//1000}k steps")
-        log(f"  horizon={ROLLOUT_HORIZON}, model RMSE={s_rmse:.4f}")
+        # Seed env_buf with pretrain data
+        for i in range(len(s)):
+            env_buf.add(s[i], a[i], r[i], s2[i], d[i])
+
+        obs, _ = env_real.reset(seed=SEED); curve = []
+        log(f"\n[Phase 2: c4 MBPO-style with online refit] {TRAIN_STEPS//1000}k steps")
+        log(f"  horizon={ROLLOUT_HORIZON}, initial RMSE={s_rmse:.4f}")
+        log(f"  Model refit every {MODEL_TRAIN_FREQ} steps, explore in REAL env")
 
         for step in range(1, TRAIN_STEPS+1):
-            a_act = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
-            obs2, r_sim, d_flag, tr, _ = env.step(a_act)
-            env_buf.add(obs, a_act, r_sim, obs2, float(d_flag and not tr))
+            # Interact in REAL env (cheap — it's a simulator)
+            a_act = env_real.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
+            obs2, r_real_step, d_flag, tr, _ = env_real.step(a_act)
+            env_buf.add(obs, a_act, r_real_step, obs2, float(d_flag and not tr))
             obs = obs2
-            if d_flag or tr: obs, _ = env.reset()
+            if d_flag or tr: obs, _ = env_real.reset()
+
+            # Online model refit: retrain M_real on growing env_buf
+            if step > WARMUP and step % MODEL_TRAIN_FREQ == 0:
+                n_fit = min(env_buf.size, 50000)
+                idx_fit = np.random.choice(env_buf.size, n_fit, replace=False) if env_buf.size > n_fit else np.arange(env_buf.size)
+                log(f"  [REFIT step {step}] Retraining M_real on {n_fit} transitions...")
+                wm_real.fit(env_buf.s[idx_fit], env_buf.a[idx_fit],
+                           env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
+                           n_epochs=20, patience=10)
+                # Clear stale model rollouts
+                model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
+                # Generate model rollouts
                 if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
                     actions = np.array([agent.get_action(ss, deterministic=False)
@@ -332,7 +352,8 @@ def main():
                         r_pred.reshape(-1, 1), ns_pred,
                         np.zeros((ROLLOUT_BATCH, 1), np.float32))
 
-                # Train ONLY on model_buf
+                # MBPO: train on BOTH env + model data
+                agent.update(env_buf)
                 if model_buf.size >= BATCH_SIZE:
                     agent.update(model_buf)
 
@@ -344,14 +365,12 @@ def main():
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
                     ns_test, r_test = direct_model.predict(
                         env_buf.s[idx], env_buf.a[idx], deterministic=True)
-                    # Compare to REAL next state (not sim)
-                    # We don't have real next states in env_buf, so compare to sim as proxy
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
                     disagree = wm_real.get_disagreement(env_buf.s[idx], env_buf.a[idx]).mean()
                     diag = f"  m_s={s_err:.3f} dis={disagree:.3f}"
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
-        env.close()
+        env_real.close()
 
     # Summary
     avg = np.mean([r for _, r in curve[-3:]])
