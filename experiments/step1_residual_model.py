@@ -41,12 +41,11 @@ def log(msg=""):
 
 
 class ResidualMLP(nn.Module):
-    """Single MLP: (s, a) → Δs."""
-    def __init__(self, input_dim, output_dim, hidden=256):
+    """Single MLP: (s, a) → Δs. Small network to avoid overfitting."""
+    def __init__(self, input_dim, output_dim, hidden=64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, output_dim),
         )
@@ -55,19 +54,28 @@ class ResidualMLP(nn.Module):
 
 
 class ResidualEnsemble:
-    """K MLPs with bootstrap training."""
+    """
+    K MLPs with RE-SAC style dual regularization:
+    1. Ensemble disagreement penalty (discourage high variance across models)
+    2. Weight decay (L2 regularization)
+    3. Early stopping on validation loss
+    """
 
-    def __init__(self, obs_dim, act_dim, K=5, hidden=256, device="cpu"):
+    def __init__(self, obs_dim, act_dim, K=5, hidden=64, weight_decay=1e-4,
+                 disagree_penalty=0.01, device="cpu"):
         self.K = K
         self.device = device
         self.input_dim = obs_dim + act_dim
         self.output_dim = obs_dim
+        self.disagree_penalty = disagree_penalty
         self.models = [ResidualMLP(self.input_dim, obs_dim, hidden).to(device) for _ in range(K)]
-        self.optimizers = [optim.Adam(m.parameters(), lr=1e-3) for m in self.models]
+        self.optimizers = [optim.Adam(m.parameters(), lr=1e-3, weight_decay=weight_decay)
+                           for m in self.models]
 
     def fit(self, SA_train, ds_train, SA_val, ds_val,
-            n_epochs=200, batch_size=512, subsample_ratio=0.8):
-        """Train with validation tracking."""
+            n_epochs=500, batch_size=512, subsample_ratio=0.8,
+            patience=30):
+        """Train with early stopping + disagreement regularization."""
         N = len(SA_train)
         SA_t = torch.FloatTensor(SA_train).to(self.device)
         ds_t = torch.FloatTensor(ds_train).to(self.device)
@@ -76,9 +84,14 @@ class ResidualEnsemble:
 
         train_losses = []
         val_losses = []
+        best_val = float('inf')
+        best_epoch = 0
+        best_state = [m.state_dict() for m in self.models]
 
         for epoch in range(n_epochs):
             epoch_train_loss = 0.0
+
+            # Train each model on bootstrap subsample
             for k, (model, opt) in enumerate(zip(self.models, self.optimizers)):
                 n_sub = int(N * subsample_ratio)
                 idx = np.random.choice(N, n_sub, replace=True)
@@ -88,9 +101,20 @@ class ResidualEnsemble:
                 for i in range(0, n_sub, batch_size):
                     bi = idx[perm[i:i+batch_size]]
                     pred = model(SA_t[bi])
-                    loss = nn.MSELoss()(pred, ds_t[bi])
+                    mse_loss = nn.MSELoss()(pred, ds_t[bi])
+
+                    # RE-SAC style: disagreement penalty
+                    # Compute all models' predictions, penalize high std
+                    if self.disagree_penalty > 0 and n_batches % 5 == 0:
+                        with torch.no_grad():
+                            all_preds = torch.stack([m(SA_t[bi]) for m in self.models])
+                        disagree = all_preds.std(0).mean()
+                        loss = mse_loss + self.disagree_penalty * disagree
+                    else:
+                        loss = mse_loss
+
                     opt.zero_grad(); loss.backward(); opt.step()
-                    batch_loss += float(loss); n_batches += 1
+                    batch_loss += float(mse_loss); n_batches += 1
                 epoch_train_loss += batch_loss / max(n_batches, 1)
                 model.eval()
 
@@ -98,12 +122,29 @@ class ResidualEnsemble:
 
             # Validation
             with torch.no_grad():
-                preds = torch.stack([m(SA_v) for m in self.models])  # (K, N_val, obs)
+                preds = torch.stack([m(SA_v) for m in self.models])
                 val_mse = float(((preds.mean(0) - ds_v) ** 2).mean())
+                val_disagree = float(preds.std(0).mean())
                 val_losses.append(val_mse)
 
-            if (epoch + 1) % 50 == 0:
-                log(f"    epoch {epoch+1:3d} | train={train_losses[-1]:.5f} val={val_losses[-1]:.5f}")
+            # Early stopping
+            if val_mse < best_val:
+                best_val = val_mse
+                best_epoch = epoch
+                best_state = [m.state_dict().copy() for m in self.models]
+
+            if (epoch + 1) % 20 == 0:
+                log(f"    epoch {epoch+1:3d} | train={train_losses[-1]:.5f} "
+                    f"val={val_mse:.5f} disagree={val_disagree:.4f}"
+                    f"{' *best' if epoch == best_epoch else ''}")
+
+            if epoch - best_epoch >= patience:
+                log(f"    Early stop at epoch {epoch+1} (best={best_epoch+1}, val={best_val:.5f})")
+                break
+
+        # Restore best
+        for m, sd in zip(self.models, best_state):
+            m.load_state_dict(sd)
 
         return train_losses, val_losses
 
