@@ -40,10 +40,12 @@ WARMUP         = 2_000
 BATCH_SIZE     = 256
 REPLAY_SIZE    = 100_000
 
-# Model-based
-ROLLOUT_HORIZON = 5       # imagined rollout length
-ROLLOUT_BATCH   = 256     # rollouts per training step
+# Model-based (MBPO-tuned for HalfCheetah)
+ROLLOUT_HORIZON = 1       # single-step rollout — no error accumulation
+ROLLOUT_BATCH   = 400     # rollouts per generation cycle
+MODEL_BUF_MAX   = 50_000  # cap model buffer to prevent domination
 MODEL_TRAIN_FREQ = 1000   # retrain world model every N steps
+ROLLOUT_FREQ    = 250     # generate rollouts every N env steps
 
 # RE-SAC
 N_CRITICS = 3; BETA_LCB = -2.0; HIDDEN = 256; LR = 3e-4
@@ -211,22 +213,23 @@ def main():
         else:
             corrected_model = CorrectedWorldModel(wm, ResidualAdapter(obs_dim, act_dim, device=DEVICE))
 
-        # Phase 3: Dyna-style policy training
+        # Phase 3: Dyna-style policy training (MBPO-tuned)
         env = env_cls(mode="sim")
         al = float(env.action_space.high[0])
         agent = RESACAgent(obs_dim, act_dim, al, hidden_dim=HIDDEN, n_critics=N_CRITICS,
                            beta=BETA_LCB, lr=LR, device=DEVICE)
 
-        env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)   # real env transitions
-        model_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)  # imagined transitions
+        env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)
+        model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
         obs, _ = env.reset(seed=SEED); curve = []
         label = "c2: M_sim rollouts" if mode == "c2" else "c3: M_real rollouts"
         log(f"\n[Phase 3: {label}] {TRAIN_STEPS//1000}k steps")
-        log(f"  Rollout horizon={ROLLOUT_HORIZON}, batch={ROLLOUT_BATCH}")
+        log(f"  horizon={ROLLOUT_HORIZON}, rollout_batch={ROLLOUT_BATCH}, "
+            f"model_buf_max={MODEL_BUF_MAX}, rollout_freq={ROLLOUT_FREQ}")
 
         for step in range(1, TRAIN_STEPS+1):
-            # Real env interaction
+            # Real env interaction (always — this is the ground truth)
             a = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
             obs2, r, d, tr, _ = env.step(a)
             env_buf.add(obs, a, r, obs2, float(d and not tr))
@@ -234,28 +237,20 @@ def main():
             if d or tr: obs, _ = env.reset()
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
-                # Generate imagined rollouts from world model
-                if step % 5 == 0:  # model rollouts every 5 env steps
+                # Generate single-step imagined rollouts periodically
+                if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
-                    rollout = corrected_model.imagine_rollout(
-                        start_states,
-                        lambda s: agent.actor.get_action(
-                            s[0] if len(s.shape) == 1 else s[np.random.randint(len(s))],
-                            deterministic=False).reshape(1, -1).repeat(len(s), axis=0)
-                        if len(s.shape) > 1 else agent.get_action(s, deterministic=False),
-                        horizon=ROLLOUT_HORIZON
-                    )
-                    # Add imagined transitions to model buffer
-                    for t in range(ROLLOUT_HORIZON):
-                        model_buf.add_batch(
-                            rollout["states"][t],
-                            rollout["actions"][t],
-                            rollout["rewards"][t].reshape(-1, 1),
-                            rollout["next_states"][t],
-                            np.zeros((ROLLOUT_BATCH, 1), np.float32)
-                        )
+                    # Single-step: just predict one transition per start state
+                    actions = np.array([agent.get_action(s, deterministic=False)
+                                       for s in start_states])
+                    ns_pred, r_pred = corrected_model.predict(
+                        start_states, actions, deterministic=False)
+                    model_buf.add_batch(
+                        start_states, actions,
+                        r_pred.reshape(-1, 1), ns_pred,
+                        np.zeros((ROLLOUT_BATCH, 1), np.float32))
 
-                # Train on mix of real + imagined data
+                # Train: 1 update on env data, 1 on model data (50:50)
                 agent.update(env_buf)
                 if model_buf.size >= BATCH_SIZE:
                     agent.update(model_buf)
@@ -263,8 +258,20 @@ def main():
             if step % EVAL_INTERVAL == 0:
                 ret, std = evaluate(agent, env_cls)
                 curve.append((step, ret))
+
+                # Model quality diagnostic: predict on recent env transitions
+                diag = ""
+                if env_buf.size >= 500:
+                    idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
+                    ns_test, r_test = corrected_model.predict(
+                        env_buf.s[idx], env_buf.a[idx], deterministic=True)
+                    s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
+                    r_err = np.sqrt(np.mean((r_test - env_buf.r[idx].squeeze()) ** 2))
+                    disagree = corrected_model.wm.get_disagreement(env_buf.s[idx], env_buf.a[idx]).mean()
+                    diag = f"  m_err_s={s_err:.3f} m_err_r={r_err:.3f} disagree={disagree:.3f}"
+
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
-                    f"env_buf={env_buf.size} model_buf={model_buf.size}")
+                    f"env={env_buf.size} model={model_buf.size}{diag}")
 
         env.close()
 
