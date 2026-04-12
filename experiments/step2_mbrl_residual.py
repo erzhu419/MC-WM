@@ -128,7 +128,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -275,6 +275,82 @@ def main():
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
 
+        env.close()
+
+    elif mode == "c4":
+        # ── Direct M_real: train world model directly on REAL transitions
+        # No residual needed — just train M on real dynamics
+        # This validates: if model is accurate enough, does MBRL work?
+        np.random.seed(SEED); torch.manual_seed(SEED)
+
+        log(f"\n[Phase 1] Collecting 50k REAL transitions...")
+        s, a, r, s2, d, ep = collect_transitions(env_cls, "real", N_SIM_PRETRAIN)
+        log(f"  {len(s)} transitions, {ep} episodes")
+
+        log(f"  Training M_real directly on real data (K=5)...")
+        wm_real = WorldModelEnsemble(obs_dim, act_dim, K=5, hidden=200, device=DEVICE)
+        wm_real.fit(s, a, s2, r, n_epochs=100, patience=20)
+
+        # Validate
+        ns_pred, r_pred = wm_real.predict(s[:2000], a[:2000], deterministic=True)
+        s_rmse = np.sqrt(np.mean((ns_pred - s2[:2000]) ** 2))
+        r_rmse = np.sqrt(np.mean((r_pred - r[:2000]) ** 2))
+        log(f"  M_real (direct) validation: state RMSE={s_rmse:.4f}, reward RMSE={r_rmse:.4f}")
+
+        # Use M_real directly (no residual adapter needed)
+        dummy_res = ResidualAdapter(obs_dim, act_dim, device=DEVICE)
+        direct_model = CorrectedWorldModel(wm_real, dummy_res)
+
+        # Phase 2: Dyna-style training (same as c3 but with accurate model)
+        env = env_cls(mode="sim")  # still explore in sim
+        al = float(env.action_space.high[0])
+        agent = RESACAgent(obs_dim, act_dim, al, hidden_dim=HIDDEN, n_critics=N_CRITICS,
+                           beta=BETA_LCB, lr=LR, device=DEVICE)
+        env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)
+        model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+
+        obs, _ = env.reset(seed=SEED); curve = []
+        log(f"\n[Phase 2: c4 Direct M_real rollouts] {TRAIN_STEPS//1000}k steps")
+        log(f"  horizon={ROLLOUT_HORIZON}, model RMSE={s_rmse:.4f}")
+
+        for step in range(1, TRAIN_STEPS+1):
+            a_act = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
+            obs2, r_sim, d_flag, tr, _ = env.step(a_act)
+            env_buf.add(obs, a_act, r_sim, obs2, float(d_flag and not tr))
+            obs = obs2
+            if d_flag or tr: obs, _ = env.reset()
+
+            if step >= WARMUP and env_buf.size >= BATCH_SIZE:
+                if step % ROLLOUT_FREQ == 0:
+                    start_states = env_buf.sample_states(ROLLOUT_BATCH)
+                    actions = np.array([agent.get_action(ss, deterministic=False)
+                                       for ss in start_states])
+                    ns_pred, r_pred = direct_model.predict(
+                        start_states, actions, deterministic=False)
+                    model_buf.add_batch(
+                        start_states, actions,
+                        r_pred.reshape(-1, 1), ns_pred,
+                        np.zeros((ROLLOUT_BATCH, 1), np.float32))
+
+                # Train ONLY on model_buf
+                if model_buf.size >= BATCH_SIZE:
+                    agent.update(model_buf)
+
+            if step % EVAL_INTERVAL == 0:
+                ret, std = evaluate(agent, env_cls)
+                curve.append((step, ret))
+                diag = ""
+                if env_buf.size >= 500:
+                    idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
+                    ns_test, r_test = direct_model.predict(
+                        env_buf.s[idx], env_buf.a[idx], deterministic=True)
+                    # Compare to REAL next state (not sim)
+                    # We don't have real next states in env_buf, so compare to sim as proxy
+                    s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
+                    disagree = wm_real.get_disagreement(env_buf.s[idx], env_buf.a[idx]).mean()
+                    diag = f"  m_s={s_err:.3f} dis={disagree:.3f}"
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                    f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env.close()
 
     # Summary
