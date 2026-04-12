@@ -233,18 +233,14 @@ def main():
             a = env.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
             obs2, r_sim, d, tr, _ = env.step(a)
 
-            # Relabel reward through M_real: use corrected model's reward prediction
-            # This eliminates sim/real reward conflict
-            _, r_corrected = corrected_model.predict(
-                obs.reshape(1, -1), a.reshape(1, -1), deterministic=True)
-            r_use = float(r_corrected[0])
-
-            env_buf.add(obs, a, r_use, obs2, float(d and not tr))
+            # env_buf stores sim transitions — used ONLY for start-state sampling
+            env_buf.add(obs, a, r_sim, obs2, float(d and not tr))
             obs = obs2
             if d or tr: obs, _ = env.reset()
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
-                # Generate single-step imagined rollouts periodically
+                # Generate single-step rollouts from M_real
+                # Policy trains ONLY on these — reward & dynamics fully consistent
                 if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
                     actions = np.array([agent.get_action(s, deterministic=False)
@@ -256,8 +252,7 @@ def main():
                         r_pred.reshape(-1, 1), ns_pred,
                         np.zeros((ROLLOUT_BATCH, 1), np.float32))
 
-                # Train on both buffers (both have M_real-consistent rewards)
-                agent.update(env_buf)
+                # Train ONLY on model_buf — no env_buf for Q-learning
                 if model_buf.size >= BATCH_SIZE:
                     agent.update(model_buf)
 
