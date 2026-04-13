@@ -194,3 +194,22 @@ SINDy discovers symbolic structure, NAU/NMU provides OOD bounds.
 
 **SINDy+NAU is a viable (and better!) replacement for MLP δ.**
 Adds interpretability + formal OOD bound at no performance cost.
+
+---
+
+## c7 + self-hypothesis loop: IN PROGRESS
+
+Self-hypothesis loop working correctly:
+- Round 1: poly2 (300 features) → diagnosed 17/17 dims with structure
+  Findings: autocorr, heteroscedastic, non_normal (kurtosis 14-40)
+- Round 2: expanded (+49 features: x²,x³,x·|x|,x×a) → 349 features
+  Still 17/17 diagnosed
+- Round 3: expanded (+48 more) → 397 features → max rounds reached
+
+**Key discovery: x0_cube (cubic term) found by auto-expansion!**
+This is a term that poly2 library couldn't capture.
+Δs_2 = -0.547 * x0³, Δs_4 = +0.426 * x0³
+
+Performance at step 15k: real=-65 (vs c7 without loop: 2277 at 15k)
+Slower due to 3-round hypothesis loop on every refit (every 1000 steps).
+Model accuracy good: m_s=0.267 at step 15k.
