@@ -160,6 +160,22 @@ MC-WM/
 - M_real (100k 直接训练): RMSE = **0.53**
 - 需要 RMSE < 0.5 才能支撑 MBRL
 
+### 参考：H2O+ SIM 公交项目为何 work
+
+在用户的 H2O+ SUMO 项目中，SIM + SUMO offline data 能表现更好，关键设计：
+1. **50/50 固定 batch ratio**：每个 batch 50% real data + 50% sim data，real data 永远不被稀释
+2. **Discriminator importance weighting**：用 contrastive discriminator 区分 sim/real transitions，给 sim Q-target 做 importance reweighting（不是 penalty，是 weight）
+3. **Cal-QL**：防止 sim Q-target 低于 offline Q baseline（防止 Q 崩溃）
+4. **Online discriminator 训练**：discriminator 和 policy 一起训练，始终适应当前分布
+5. **Snapshot reset**：50% 的 episode 从 offline data 的 state 重启（coverage）
+
+**对比 MC-WM 的差异**：
+- H2O+ 不修正 dynamics（只 reweight），MC-WM 试图修正 world model 的 dynamics
+- H2O+ 的 discriminator 是 online 更新的，MC-WM 的 residual 是 offline 或低频更新的
+- H2O+ 有大量 offline real data（数千条 SUMO trajectories），MC-WM 只有 3k paired steps
+
+**可能的方向**：像 H2O+ 一样，放弃 "修正 world model dynamics"，改为 "在 sim env 训练但用 importance weighting 修正 Q-learning"，同时用残差模型作为 discriminator 的替代品。
+
 ### 关键失败模式
 1. SINDy poly2 OOD 爆炸 → 改用 MLP
 2. Additive Q-penalty 太小 vs reward signal → 改用 multiplicative IW → 但 gap signal 无空间变异
