@@ -527,7 +527,7 @@ def main():
         ns_sim_pred, r_sim_pred = wm_sim.predict(s_real, a_real, deterministic=True)
 
         log(f"  Training SINDy+NAU residual δ...")
-        residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE)
+        residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20)
 

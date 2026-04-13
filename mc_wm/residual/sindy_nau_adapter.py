@@ -47,7 +47,9 @@ class SINDyNAUAdapter:
 
     def __init__(self, obs_dim, act_dim, sindy_threshold=0.05, sindy_alpha=0.05,
                  nau_hidden=32, lr=1e-3, device="cpu",
-                 max_rounds=3, eps_threshold=0.05, diagnosis_alpha=0.05):
+                 max_rounds=3, eps_threshold=0.05, diagnosis_alpha=0.05,
+                 log_fn=None):
+        self._log = log_fn or (lambda msg: print(msg))
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.input_dim = obs_dim + act_dim
@@ -170,31 +172,31 @@ class SINDyNAUAdapter:
                 "n_diagnosis_fired": n_fired, "reason": "",
             }
 
-            print(f"  [Round {round_num}] features={Theta_full.shape[1]} active={n_active} "
+            self._log(f"  [Round {round_num}] features={Theta_full.shape[1]} active={n_active} "
                   f"eps_max={eps_max:.5f} diagnosed={n_fired}/{self.obs_dim}")
 
             if quality_passed:
                 log_entry["reason"] = "quality_gate"
                 self._hypothesis_logs.append(log_entry)
-                print(f"    ✓ Quality gate PASSED (eps_max={eps_max:.5f} < {self.eps_threshold})")
+                self._log(f"    ✓ Quality gate PASSED (eps_max={eps_max:.5f} < {self.eps_threshold})")
                 break
 
             if not any_structure:
                 log_entry["reason"] = "white_noise"
                 self._hypothesis_logs.append(log_entry)
-                print(f"    ✓ Remainder is white noise (no structure detected)")
+                self._log(f"    ✓ Remainder is white noise (no structure detected)")
                 break
 
             if round_num == self.max_rounds:
                 log_entry["reason"] = "max_rounds"
                 self._hypothesis_logs.append(log_entry)
-                print(f"    ⊘ Max rounds reached")
+                self._log(f"    ⊘ Max rounds reached")
                 break
 
             # Auto-expand: add new features based on diagnosis
-            print(f"    → Expanding features based on {n_fired} diagnoses...")
+            self._log(f"    → Expanding features based on {n_fired} diagnoses...")
             for ds in diag_summary[:3]:
-                print(f"      {ds}")
+                self._log(f"      {ds}")
 
             new_lib, metadata = self._expander.expand(
                 results=diagnoses, current_library=self._library,
@@ -209,11 +211,11 @@ class SINDyNAUAdapter:
                 else:
                     extra_cols = new_extra
                 extra_names.extend(new_names)
-                print(f"    Added {new_extra.shape[1]} new features: {new_names[:5]}")
+                self._log(f"    Added {new_extra.shape[1]} new features: {new_names[:5]}")
             else:
                 log_entry["reason"] = "no_expansion"
                 self._hypothesis_logs.append(log_entry)
-                print(f"    No new features to add, stopping")
+                self._log(f"    No new features to add, stopping")
                 break
 
             log_entry["reason"] = "expanded"
@@ -253,7 +255,7 @@ class SINDyNAUAdapter:
                 self._expand_specs.append({"type": "tnorm"})
 
         n_active_total = sum(m.sum() for m in active)
-        print(f"  SINDy final: {self._n_features} features, {n_active_total} active, "
+        self._log(f"  SINDy final: {self._n_features} features, {n_active_total} active, "
               f"avg MSE={errors.mean():.5f}, rounds={len(self._hypothesis_logs)}")
 
         # ── Phase 2: NAU/NMU fine-tuning on final feature set
@@ -295,10 +297,10 @@ class SINDyNAUAdapter:
                     best_state = self._nau_head.state_dict().copy()
 
             if (epoch + 1) % 20 == 0:
-                print(f"    NAU epoch {epoch+1} | val={val_loss:.5f} best={best_val:.5f} "
+                self._log(f"    NAU epoch {epoch+1} | val={val_loss:.5f} best={best_val:.5f} "
                       f"L_eff={self._nau_head.L_eff:.4f}")
             if epoch - best_epoch >= patience:
-                print(f"    NAU early stop at epoch {epoch+1} (best={best_epoch+1})")
+                self._log(f"    NAU early stop at epoch {epoch+1} (best={best_epoch+1})")
                 break
 
         self._nau_head.load_state_dict(best_state)
@@ -310,10 +312,10 @@ class SINDyNAUAdapter:
             nau_pred = self._nau_head(Theta_t[val_idx])
             sindy_mse = float(nn.MSELoss()(sindy_pred, tgt_t[val_idx]))
             nau_mse = best_val
-        print(f"  SINDy-only val MSE: {sindy_mse:.5f}")
-        print(f"  NAU val MSE:        {nau_mse:.5f}")
-        print(f"  NAU improvement:    {(1-nau_mse/sindy_mse)*100:.1f}%")
-        print(f"  OOD bound L_eff:    {self._nau_head.L_eff:.4f}")
+        self._log(f"  SINDy-only val MSE: {sindy_mse:.5f}")
+        self._log(f"  NAU val MSE:        {nau_mse:.5f}")
+        self._log(f"  NAU improvement:    {(1-nau_mse/sindy_mse)*100:.1f}%")
+        self._log(f"  OOD bound L_eff:    {self._nau_head.L_eff:.4f}")
 
     def _build_full_theta(self, SA):
         """Build full feature matrix including auto-expanded columns."""
