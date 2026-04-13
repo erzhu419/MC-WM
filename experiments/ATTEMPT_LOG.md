@@ -300,3 +300,15 @@ Root cause: more features → STLSQ coefficients less stable across refits
 → NAU warm-start target shifts → L_eff grows → OOD bound degrades.
 
 The bottleneck is δ refit stability, not feature coverage.
+
+---
+
+## c7 L_eff regularization → **3872** (worse than no-reg 5147)
+
+L_eff controlled: 171 (vs 296 without reg). But performance dropped -25%.
+reg=0.05 + clamp(200) is too aggressive — limits NAU expressiveness.
+L_eff=296 was NOT the bottleneck. The model needs that level of nonlinearity.
+
+**Conclusion: c7 no-loop, no-reg, poly2 only = 5147 remains the BEST.**
+The gap to c4 (6792) comes from δ architecture limitations (SINDy+NAU ~20k params
+vs c4's full model ~120k params), not from L_eff instability.
