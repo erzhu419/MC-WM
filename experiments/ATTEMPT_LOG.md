@@ -279,3 +279,24 @@ reward precision matters more when model data dominates training).
 | c7 split (state+reward) | 4949 | better reward, same performance |
 | c8 LLM oracle | 4419 | physics features |
 | c4 Direct M_real | 6792 | upper bound |
+
+---
+
+## c7 orthogonal expand → **3722** (worse than no-loop 5147)
+
+Orthogonal features discovered: sin(x1)=0.55 corr, cos(3x1)=0.47, 3-way cross terms.
+Principled selection (only orthogonal features kept), 320 total features.
+But L_eff grew to 793 (vs 296 for no-loop) → refit instability → worse performance.
+
+**Confirmed pattern: ALL feature expansion hurts.**
+| Expansion | Features | Return | L_eff |
+|-----------|----------|--------|-------|
+| None (poly2) | 300 | 5147 | 296 |
+| Auto-expand | 386 | 3999 | 1032 |
+| Orthogonal | 320 | 3722 | 793 |
+| LLM oracle | 310 | 4419 | 524 |
+
+Root cause: more features → STLSQ coefficients less stable across refits
+→ NAU warm-start target shifts → L_eff grows → OOD bound degrades.
+
+The bottleneck is δ refit stability, not feature coverage.
