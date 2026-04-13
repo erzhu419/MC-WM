@@ -258,3 +258,24 @@ LLM oracle may be more valuable for complex nonlinear gaps (e.g., real robots).
 | c7+loop | 3999 | auto-expand hurts stability |
 | c8 LLM oracle | 4419 | physics features redundant with poly2 |
 | c4 Direct M_real | 6792 | upper bound |
+
+---
+
+## c7 split reward: SINDy+NAU for state, MLP for reward → **4949**
+
+Reward correction accuracy: m_r from 0.16 (shared) to 0.053 (3x better).
+State correction: 78% improvement (similar to before).
+RL performance: 4949 ≈ 5147 (within seed variance, -4%).
+
+Split doesn't significantly improve RL because model_buf=400 (too small —
+reward precision matters more when model data dominates training).
+
+**Updated scoreboard:**
+| Config | Return | Key change |
+|--------|--------|-----------|
+| c1 Raw Sim | 875 | baseline |
+| c6v2 MLP δ | 4674 | MLP 128×2 |
+| c7 SINDy+NAU (shared) | 5147 | best poly2+NAU |
+| c7 split (state+reward) | 4949 | better reward, same performance |
+| c8 LLM oracle | 4419 | physics features |
+| c4 Direct M_real | 6792 | upper bound |
