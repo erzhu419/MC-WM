@@ -188,14 +188,18 @@ class SINDyNAUAdapter:
                 for i in range(0, len(perm_t), batch_size):
                     bi = perm_t[i:i+batch_size]
                     pred = self._nau_head(Theta_t[bi])
-                    loss = nn.MSELoss()(pred, tgt_t[bi]) + 0.01 * self._nau_head.regularization_loss()
+                    # Stronger regularization → controls L_eff growth
+                    loss = nn.MSELoss()(pred, tgt_t[bi]) + 0.05 * self._nau_head.regularization_loss()
                     self._nau_optimizer.zero_grad(); loss.backward(); self._nau_optimizer.step()
                 self._nau_head.eval()
+                # Clamp L_eff after each epoch
+                self._nau_head.clamp_lipschitz(max_L=200.0)
                 with torch.no_grad():
                     vl = float(nn.MSELoss()(self._nau_head(Theta_t[val_idx]), tgt_t[val_idx]))
                     if vl < best_val: best_val = vl; best_epoch = epoch; best_state = self._nau_head.state_dict().copy()
                 if epoch - best_epoch >= patience: break
             self._nau_head.load_state_dict(best_state)
+            self._nau_head.clamp_lipschitz(max_L=200.0)  # final clamp
             self._trained = True
             return
 
@@ -357,9 +361,10 @@ class SINDyNAUAdapter:
                 pred = self._nau_head(Theta_t[bi])
                 mse_loss = nn.MSELoss()(pred, tgt_t[bi])
                 reg_loss = self._nau_head.regularization_loss()
-                loss = mse_loss + 0.01 * reg_loss
+                loss = mse_loss + 0.05 * reg_loss  # stronger L_eff regularization
                 self._nau_optimizer.zero_grad(); loss.backward(); self._nau_optimizer.step()
             self._nau_head.eval()
+            self._nau_head.clamp_lipschitz(max_L=200.0)
 
             with torch.no_grad():
                 val_pred = self._nau_head(Theta_t[val_idx])

@@ -112,7 +112,28 @@ class SymbolicResidualHead(nn.Module):
         return alpha * nau_out + (1 - alpha) * nmu_out
 
     def regularization_loss(self) -> torch.Tensor:
-        return self.nau.regularization_loss()
+        """NAU sparsity + NMU coefficient + spectral norm penalties."""
+        nau_reg = self.nau.regularization_loss()
+        # Penalize large NMU coefficients → controls L_nmu = 2*max(|c|)
+        nmu_reg = self.nmu.coeff.abs().mean()
+        # Penalize large feature_net weights → controls K_g = Π(σ_max)
+        spectral_reg = torch.tensor(0.0, device=nau_reg.device)
+        for m in self.feature_net:
+            if isinstance(m, nn.Linear):
+                spectral_reg = spectral_reg + torch.linalg.svdvals(m.weight)[0]
+        return nau_reg + 0.1 * nmu_reg + 0.01 * spectral_reg
+
+    def clamp_lipschitz(self, max_L=200.0):
+        """Hard clamp: if L_eff > max_L, scale down NMU coefficients."""
+        L = self.L_eff
+        if L > max_L:
+            scale = max_L / L
+            with torch.no_grad():
+                self.nmu.coeff.mul_(scale ** 0.5)
+                # Also scale down feature_net weights slightly
+                for m in self.feature_net:
+                    if isinstance(m, nn.Linear):
+                        m.weight.mul_(scale ** 0.25)
 
     @property
     def L_eff(self) -> float:
