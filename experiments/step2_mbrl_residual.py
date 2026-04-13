@@ -63,6 +63,9 @@ class ReplayBuffer:
     def add_batch(self, s, a, r, s2, d):
         for i in range(len(s)):
             self.add(s[i], a[i], r[i], s2[i], d[i])
+    def reset(self):
+        """Clear buffer without reallocating arrays (avoids malloc/free overhead)."""
+        self.ptr = self.size = 0
     def sample(self, n):
         idx = np.random.randint(0, self.size, n)
         return tuple(torch.FloatTensor(x[idx]).to(DEVICE) for x in [self.s, self.a, self.r, self.s2, self.d])
@@ -72,43 +75,54 @@ class ReplayBuffer:
 
 
 def collect_transitions(env_cls, mode, n_steps, policy_fn=None, seed=42):
-    """Collect transitions. Returns (s, a, r, s2, done)."""
+    """Collect transitions. Returns (s, a, r, s2, done).
+    Uses pre-allocated numpy arrays to avoid Python list → np.array peak memory.
+    """
     env = env_cls(mode=mode)
-    s_list, a_list, r_list, s2_list, d_list = [], [], [], [], []
+    od = env.observation_space.shape[0]; ad = env.action_space.shape[0]
+    s_buf  = np.empty((n_steps, od), np.float32)
+    a_buf  = np.empty((n_steps, ad), np.float32)
+    r_buf  = np.empty(n_steps, np.float32)
+    s2_buf = np.empty((n_steps, od), np.float32)
+    d_buf  = np.empty(n_steps, np.float32)
     obs, _ = env.reset(seed=seed); ep = 0
-    for _ in range(n_steps):
+    for i in range(n_steps):
         a = env.action_space.sample() if policy_fn is None else policy_fn(obs)
         obs2, r, d, tr, _ = env.step(a)
-        s_list.append(obs); a_list.append(a); r_list.append(r)
-        s2_list.append(obs2); d_list.append(float(d and not tr))
+        s_buf[i]=obs; a_buf[i]=a; r_buf[i]=r; s2_buf[i]=obs2; d_buf[i]=float(d and not tr)
         obs = obs2
         if d or tr: ep += 1; obs, _ = env.reset(seed=seed+ep)
     env.close()
-    return (np.array(s_list, np.float32), np.array(a_list, np.float32),
-            np.array(r_list, np.float32), np.array(s2_list, np.float32),
-            np.array(d_list, np.float32), ep)
+    return s_buf, a_buf, r_buf, s2_buf, d_buf, ep
 
 
 def collect_paired(env_cls, n_steps, policy_fn=None, seed=42):
-    """Collect paired sim+real transitions."""
+    """Collect paired sim+real transitions.
+    Uses pre-allocated numpy arrays to avoid Python list → np.array peak memory.
+    """
     sim = env_cls(mode="sim"); real = env_cls(mode="real")
+    od = sim.observation_space.shape[0]; ad = sim.action_space.shape[0]
+    s_buf    = np.empty((n_steps, od), np.float32)
+    a_buf    = np.empty((n_steps, ad), np.float32)
+    ns_sim_b = np.empty((n_steps, od), np.float32)
+    ns_real_b= np.empty((n_steps, od), np.float32)
+    rs_buf   = np.empty(n_steps, np.float32)
+    rr_buf   = np.empty(n_steps, np.float32)
     os_s, _ = sim.reset(seed=seed); os_r, _ = real.reset(seed=seed)
-    s_list, a_list = [], []
-    ns_sim, ns_real, r_sim, r_real = [], [], [], []
     ep = 0
-    for _ in range(n_steps):
+    for i in range(n_steps):
         a = sim.action_space.sample() if policy_fn is None else policy_fn(os_s)
         nss, rs, ds, ts, _ = sim.step(a); nsr, rr, dr, tr, _ = real.step(a)
-        s_list.append(os_s); a_list.append(a)
-        ns_sim.append(nss); ns_real.append(nsr); r_sim.append(rs); r_real.append(rr)
+        s_buf[i]=os_s; a_buf[i]=a; ns_sim_b[i]=nss; ns_real_b[i]=nsr
+        rs_buf[i]=rs; rr_buf[i]=rr
         os_s, os_r = nss, nsr
         if ds or ts or dr or tr:
             ep += 1; os_s, _ = sim.reset(seed=seed+ep); os_r, _ = real.reset(seed=seed+ep)
     sim.close(); real.close()
     return {
-        "s": np.array(s_list, np.float32), "a": np.array(a_list, np.float32),
-        "ns_sim": np.array(ns_sim, np.float32), "ns_real": np.array(ns_real, np.float32),
-        "r_sim": np.array(r_sim, np.float32), "r_real": np.array(r_real, np.float32),
+        "s": s_buf, "a": a_buf,
+        "ns_sim": ns_sim_b, "ns_real": ns_real_b,
+        "r_sim": rs_buf, "r_real": rr_buf,
         "n_eps": ep,
     }
 
@@ -243,8 +257,7 @@ def main():
                 # Policy trains ONLY on these — reward & dynamics fully consistent
                 if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
-                    actions = np.array([agent.get_action(s, deterministic=False)
-                                       for s in start_states])
+                    actions = agent.get_actions_batch(start_states, deterministic=False)
                     ns_pred, r_pred = corrected_model.predict(
                         start_states, actions, deterministic=False)
                     model_buf.add_batch(
@@ -336,15 +349,14 @@ def main():
                 wm_real.fit(env_buf.s[idx_fit], env_buf.a[idx_fit],
                            env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
                            n_epochs=20, patience=10)
-                # Clear stale model rollouts
-                model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+                # Clear stale model rollouts (reset instead of reallocate)
+                model_buf.reset()
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
                 # Generate model rollouts
                 if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
-                    actions = np.array([agent.get_action(ss, deterministic=False)
-                                       for ss in start_states])
+                    actions = agent.get_actions_batch(start_states, deterministic=False)
                     ns_pred, r_pred = direct_model.predict(
                         start_states, actions, deterministic=False)
                     model_buf.add_batch(
@@ -462,13 +474,12 @@ def main():
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
                             n_epochs=50, patience=15)
                 corrected = CorrectedWorldModel(wm_sim, residual)
-                model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+                model_buf.reset()  # clear stale rollouts without reallocating
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
                 if step % ROLLOUT_FREQ == 0:
                     start_states = env_buf.sample_states(ROLLOUT_BATCH)
-                    actions = np.array([agent.get_action(ss, deterministic=False)
-                                       for ss in start_states])
+                    actions = agent.get_actions_batch(start_states, deterministic=False)
                     ns_pred, r_pred = corrected.predict(
                         start_states, actions, deterministic=False)
                     model_buf.add_batch(

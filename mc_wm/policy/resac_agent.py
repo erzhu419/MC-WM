@@ -132,6 +132,19 @@ class GaussianActor(nn.Module):
                 a = torch.tanh(mean + std * z) * self.act_limit
         return a.squeeze(0).cpu().numpy()
 
+    def get_actions_batch(self, obs_batch: np.ndarray, deterministic=False) -> np.ndarray:
+        """Batched version of get_action — avoids Python list comprehension overhead."""
+        with torch.no_grad():
+            s = torch.FloatTensor(obs_batch).to(DEVICE)  # (B, obs_dim)
+            mean, log_std = self.forward(s)
+            if deterministic:
+                a = torch.tanh(mean) * self.act_limit
+            else:
+                std = log_std.exp()
+                z = Normal(0, 1).sample(mean.shape).to(s.device)
+                a = torch.tanh(mean + std * z) * self.act_limit
+        return a.cpu().numpy()  # (B, act_dim)
+
 
 # ─────────────────────────────────────────────
 # RE-SAC Agent
@@ -335,3 +348,7 @@ class RESACAgent:
 
     def get_action(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
         return self.actor.get_action(obs, deterministic)
+
+    def get_actions_batch(self, obs_batch: np.ndarray, deterministic: bool = False) -> np.ndarray:
+        """Batched action sampling — one GPU call instead of N individual calls."""
+        return self.actor.get_actions_batch(obs_batch, deterministic)
