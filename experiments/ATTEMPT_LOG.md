@@ -235,3 +235,26 @@ Expansion adds value for interpretability but slightly hurts online performance.
 | c7 SINDy+NAU (no loop) | 5147 | best overall |
 | c7+loop (fixed) | 3999 | loop adds features but hurts refit stability |
 | c4 Direct M_real | 6792 | upper bound |
+
+---
+
+## c8: LLM Oracle physics features → **4419**
+
+10 physics-informed features (grav_bias, cos_theta, sin_theta, vz, z_vz, etc.)
+added on top of 300 poly2 → 310 total features.
+
+Result: 4419 (vs c7 poly2-only=5147, -14%).
+
+Physics features don't help for GravityCheetah: poly2 already covers the relevant
+terms (z, vz, z*vz, vz² are all in poly2). cos(θ)≈1 for small angles.
+LLM oracle may be more valuable for complex nonlinear gaps (e.g., real robots).
+
+**Final scoreboard:**
+| Config | Return | Notes |
+|--------|--------|-------|
+| c1 Raw Sim | 875 | baseline |
+| c6v2 MLP δ | 4674 | best MLP |
+| c7 SINDy+NAU | **5147** | **BEST** — poly2 + NAU/NMU |
+| c7+loop | 3999 | auto-expand hurts stability |
+| c8 LLM oracle | 4419 | physics features redundant with poly2 |
+| c4 Direct M_real | 6792 | upper bound |
