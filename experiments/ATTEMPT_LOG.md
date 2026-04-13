@@ -168,3 +168,15 @@ c6v2 (128×2) at 4840 remains the best residual configuration.
 
 **Conclusion**: δ capacity sweet spot is ~128 hidden. Larger overfits, smaller underfits.
 c6v2 = 4840 (71% of c4=6792) is the validated result for residual architecture.
+
+---
+
+## c6 rerun (memory leak fix): **4674** ✓ (confirms c6v2=4840)
+
+Two independent runs: 4840 and 4674. Stable within ~3% seed variance.
+Memory leak fix (deque maxlen, batch actions) does not affect convergence.
+
+**Validated residual world model result:**
+- M_sim(frozen) + δ(128×2, warm-start, online refit) = ~4750 avg
+- vs c4 Direct M_real = 6792 (70% of upper bound)
+- vs c1 Raw Sim baseline = 875 (+440% improvement)
