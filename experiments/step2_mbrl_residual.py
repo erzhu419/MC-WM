@@ -128,7 +128,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -368,6 +368,127 @@ def main():
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
                     disagree = wm_real.get_disagreement(env_buf.s[idx], env_buf.a[idx]).mean()
                     diag = f"  m_s={s_err:.3f} dis={disagree:.3f}"
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                    f"env={env_buf.size} mdl={model_buf.size}{diag}")
+        env_real.close()
+
+    elif mode == "c6":
+        # ── c4 MBPO pipeline but with M_sim + residual δ instead of direct M_real
+        #
+        # Tests: is residual (M_sim + δ) better/worse/same as direct M_real?
+        # Both interact in REAL env, both do online refit, both mixed training.
+        # Only difference: world model architecture.
+        #
+        # If c6 ≈ c4: residual adds nothing (direct is simpler)
+        # If c6 > c4: residual provides useful structural prior
+        # If c6 < c4: residual hurts (M_sim prior is wrong)
+        np.random.seed(SEED); torch.manual_seed(SEED)
+
+        # Phase 1a: Train M_sim on sim data (frozen base)
+        log(f"\n[Phase 1a] Collecting {N_SIM_PRETRAIN//1000}k SIM transitions + training M_sim...")
+        s_sim, a_sim, r_sim, s2_sim, d_sim, ep_sim = collect_transitions(
+            env_cls, "sim", N_SIM_PRETRAIN)
+        log(f"  {len(s_sim)} sim transitions, {ep_sim} episodes")
+
+        wm_sim = WorldModelEnsemble(obs_dim, act_dim, K=5, hidden=200, device=DEVICE)
+        wm_sim.fit(s_sim, a_sim, s2_sim, r_sim, n_epochs=100, patience=20)
+        ns_p, r_p = wm_sim.predict(s_sim[:1000], a_sim[:1000], deterministic=True)
+        sim_rmse = np.sqrt(np.mean((ns_p - s2_sim[:1000]) ** 2))
+        log(f"  M_sim RMSE on sim: {sim_rmse:.4f}")
+        wm_sim.freeze()
+
+        # Phase 1b: Collect initial real data + train residual δ
+        log(f"\n[Phase 1b] Collecting {N_SIM_PRETRAIN//1000}k REAL transitions for env_buf seed...")
+        s_real, a_real, r_real, s2_real, d_real, ep_real = collect_transitions(
+            env_cls, "real", N_SIM_PRETRAIN)
+        log(f"  {len(s_real)} real transitions, {ep_real} episodes")
+
+        log(f"  Training initial residual δ on {N_SIM_PRETRAIN//1000}k real transitions...")
+        # For residual: we need paired (sim_pred, real_actual) data
+        # Use M_sim to predict what sim would give, compare with actual real
+        ns_sim_pred, r_sim_pred = wm_sim.predict(s_real[:N_SIM_PRETRAIN],
+                                                  a_real[:N_SIM_PRETRAIN], deterministic=True)
+        residual = ResidualAdapter(obs_dim, act_dim, hidden=64, device=DEVICE)
+        residual.fit(s_real, a_real,
+                     ns_sim_pred, r_sim_pred,  # what M_sim predicts
+                     s2_real, r_real,           # what real actually gives
+                     n_epochs=100, patience=20)
+
+        corrected = CorrectedWorldModel(wm_sim, residual)
+
+        # Validate M_real = M_sim + δ
+        ns_corr, r_corr = corrected.predict(s_real[:2000], a_real[:2000], deterministic=True)
+        corr_rmse = np.sqrt(np.mean((ns_corr - s2_real[:2000]) ** 2))
+        direct_rmse = np.sqrt(np.mean((ns_sim_pred[:2000] - s2_real[:2000]) ** 2))
+        log(f"  M_sim → real RMSE: {direct_rmse:.4f}")
+        log(f"  M_real (M_sim+δ) → real RMSE: {corr_rmse:.4f}")
+        log(f"  Residual improvement: {(1-corr_rmse/direct_rmse)*100:.1f}%")
+
+        # Phase 2: MBPO in real env with M_sim+δ
+        env_real = env_cls(mode="real")
+        al = float(env_real.action_space.high[0])
+        agent = RESACAgent(obs_dim, act_dim, al, hidden_dim=HIDDEN, n_critics=N_CRITICS,
+                           beta=BETA_LCB, lr=LR, device=DEVICE)
+        env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)
+        model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+
+        # Seed env_buf with pretrain real data
+        for i in range(len(s_real)):
+            env_buf.add(s_real[i], a_real[i], r_real[i], s2_real[i], d_real[i])
+
+        obs, _ = env_real.reset(seed=SEED); curve = []
+        log(f"\n[Phase 2: c6 MBPO with M_sim+δ] {TRAIN_STEPS//1000}k steps")
+        log(f"  M_sim frozen, only refit δ online")
+
+        for step in range(1, TRAIN_STEPS+1):
+            a_act = env_real.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
+            obs2, r_step, d_flag, tr, _ = env_real.step(a_act)
+            env_buf.add(obs, a_act, r_step, obs2, float(d_flag and not tr))
+            obs = obs2
+            if d_flag or tr: obs, _ = env_real.reset()
+
+            # Online refit: only retrain RESIDUAL δ (M_sim stays frozen)
+            if step > WARMUP and step % MODEL_TRAIN_FREQ == 0:
+                n_fit = min(env_buf.size, 50000)
+                idx_fit = np.random.choice(env_buf.size, n_fit, replace=False) if env_buf.size > n_fit else np.arange(env_buf.size)
+                # Get M_sim predictions for these real states
+                ns_sim_p, r_sim_p = wm_sim.predict(
+                    env_buf.s[idx_fit], env_buf.a[idx_fit], deterministic=True)
+                log(f"  [REFIT δ step {step}] Retraining residual on {n_fit} transitions...")
+                residual = ResidualAdapter(obs_dim, act_dim, hidden=64, device=DEVICE)
+                residual.fit(env_buf.s[idx_fit], env_buf.a[idx_fit],
+                            ns_sim_p, r_sim_p,
+                            env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
+                            n_epochs=20, patience=10)
+                corrected = CorrectedWorldModel(wm_sim, residual)
+                model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
+
+            if step >= WARMUP and env_buf.size >= BATCH_SIZE:
+                if step % ROLLOUT_FREQ == 0:
+                    start_states = env_buf.sample_states(ROLLOUT_BATCH)
+                    actions = np.array([agent.get_action(ss, deterministic=False)
+                                       for ss in start_states])
+                    ns_pred, r_pred = corrected.predict(
+                        start_states, actions, deterministic=False)
+                    model_buf.add_batch(
+                        start_states, actions,
+                        r_pred.reshape(-1, 1), ns_pred,
+                        np.zeros((ROLLOUT_BATCH, 1), np.float32))
+
+                agent.update(env_buf)
+                if model_buf.size >= BATCH_SIZE:
+                    agent.update(model_buf)
+
+            if step % EVAL_INTERVAL == 0:
+                ret, std = evaluate(agent, env_cls)
+                curve.append((step, ret))
+                diag = ""
+                if env_buf.size >= 500:
+                    idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
+                    ns_test, _ = corrected.predict(
+                        env_buf.s[idx], env_buf.a[idx], deterministic=True)
+                    s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
+                    diag = f"  m_s={s_err:.3f}"
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
