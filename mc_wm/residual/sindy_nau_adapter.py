@@ -80,12 +80,20 @@ class SINDyNAUAdapter:
         self._nau_optimizer = None
         self._nau_lr = lr
 
+        # Separate reward correction (simple MLP, not shared with state SINDy)
+        import torch.nn as tnn
+        self._reward_net = tnn.Sequential(
+            tnn.Linear(obs_dim + act_dim, 64), tnn.ReLU(),
+            tnn.Linear(64, 1),
+        ).to(device)
+        self._reward_opt = optim.Adam(self._reward_net.parameters(), lr=lr, weight_decay=1e-4)
+
         # Training state
         self._trained = False
         self._train_center = None
         self._fit_errors = None
         self._hypothesis_logs = []
-        self._loop_done = False  # True after first fit — refit skips loop
+        self._loop_done = False
 
     def _sindy_fit_one_round(self, Theta, targets):
         """Fit SINDy coefficients (Ridge + STLSQ) on feature matrix Theta."""
@@ -125,12 +133,36 @@ class SINDyNAUAdapter:
         real_deltas = real_next_states - states
         delta_correction_s = real_deltas - sim_deltas
         delta_correction_r = (real_rewards - sim_rewards).reshape(-1, 1)
-        targets = np.concatenate([delta_correction_s, delta_correction_r], axis=-1)
+        # SINDy+NAU only fits STATE correction (obs_dim outputs)
+        # Reward correction uses separate MLP
+        targets = delta_correction_s  # (N, obs_dim) — state only
 
         SA = np.concatenate([states, actions], axis=-1).astype(np.float32)
         N = len(SA)
-        n_outputs = self.obs_dim + 1
+        n_outputs = self.obs_dim  # state only, reward is separate
         self._train_center = SA.mean(axis=0)
+
+        # ── Train reward correction MLP separately
+        SA_t = torch.FloatTensor(SA).to(self.device)
+        dr_t = torch.FloatTensor(delta_correction_r).to(self.device)
+        perm_r = np.random.permutation(N)
+        n_val_r = max(int(N * 0.1), 50)
+        best_r_val = float('inf'); best_r_state = self._reward_net.state_dict().copy()
+        for ep in range(100):
+            self._reward_net.train()
+            for i in range(0, N - n_val_r, 256):
+                bi = perm_r[n_val_r + i:n_val_r + i + 256]
+                if len(bi) == 0: break
+                pred_r = self._reward_net(SA_t[bi])
+                loss_r = nn.MSELoss()(pred_r, dr_t[bi])
+                self._reward_opt.zero_grad(); loss_r.backward(); self._reward_opt.step()
+            self._reward_net.eval()
+            with torch.no_grad():
+                vl = float(nn.MSELoss()(self._reward_net(SA_t[perm_r[:n_val_r]]), dr_t[perm_r[:n_val_r]]))
+                if vl < best_r_val: best_r_val = vl; best_r_ep = ep; best_r_state = self._reward_net.state_dict().copy()
+            if ep - best_r_ep >= 20: break
+        self._reward_net.load_state_dict(best_r_state)
+        self._log(f"  Reward MLP: val MSE={best_r_val:.5f} (separate from state SINDy)")
 
         # ── REFIT path: skip loop, just re-fit SINDy + warm-start NAU
         if self._loop_done:
@@ -409,15 +441,21 @@ class SINDyNAUAdapter:
         return Theta
 
     def predict_correction(self, states, actions):
-        """Returns (Δs_correction, Δr_correction) using NAU/NMU head."""
+        """Returns (Δs_correction, Δr_correction). State from NAU, reward from MLP."""
         SA = np.concatenate([states, actions], axis=-1).astype(np.float32)
+
+        # State correction: SINDy+NAU
         Theta = self._build_full_theta(SA)
         Theta_t = torch.FloatTensor(Theta).to(self.device)
-
         with torch.no_grad():
-            out = self._nau_head(Theta_t).cpu().numpy()
+            ds = self._nau_head(Theta_t).cpu().numpy()  # (N, obs_dim)
 
-        return out[:, :self.obs_dim], out[:, self.obs_dim]
+        # Reward correction: separate MLP
+        SA_t = torch.FloatTensor(SA).to(self.device)
+        with torch.no_grad():
+            dr = self._reward_net(SA_t).cpu().numpy().squeeze(-1)  # (N,)
+
+        return ds, dr
 
     def get_ood_bound(self, states, actions):
         """
