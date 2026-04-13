@@ -404,11 +404,9 @@ def main():
         log(f"  {len(s_real)} real transitions, {ep_real} episodes")
 
         log(f"  Training initial residual δ on {N_SIM_PRETRAIN//1000}k real transitions...")
-        # For residual: we need paired (sim_pred, real_actual) data
-        # Use M_sim to predict what sim would give, compare with actual real
         ns_sim_pred, r_sim_pred = wm_sim.predict(s_real[:N_SIM_PRETRAIN],
                                                   a_real[:N_SIM_PRETRAIN], deterministic=True)
-        residual = ResidualAdapter(obs_dim, act_dim, hidden=64, device=DEVICE)
+        residual = ResidualAdapter(obs_dim, act_dim, hidden=128, device=DEVICE)
         residual.fit(s_real, a_real,
                      ns_sim_pred, r_sim_pred,  # what M_sim predicts
                      s2_real, r_real,           # what real actually gives
@@ -448,18 +446,20 @@ def main():
             if d_flag or tr: obs, _ = env_real.reset()
 
             # Online refit: only retrain RESIDUAL δ (M_sim stays frozen)
+            # Fix 1: warm-start δ (keep weights, don't recreate)
+            # Fix 2: larger δ (128×2)
+            # Fix 3: more epochs (50)
             if step > WARMUP and step % MODEL_TRAIN_FREQ == 0:
                 n_fit = min(env_buf.size, 50000)
                 idx_fit = np.random.choice(env_buf.size, n_fit, replace=False) if env_buf.size > n_fit else np.arange(env_buf.size)
-                # Get M_sim predictions for these real states
                 ns_sim_p, r_sim_p = wm_sim.predict(
                     env_buf.s[idx_fit], env_buf.a[idx_fit], deterministic=True)
-                log(f"  [REFIT δ step {step}] Retraining residual on {n_fit} transitions...")
-                residual = ResidualAdapter(obs_dim, act_dim, hidden=64, device=DEVICE)
+                log(f"  [REFIT δ step {step}] Warm-start refit on {n_fit} transitions...")
+                # Warm-start: reuse existing residual, just keep training
                 residual.fit(env_buf.s[idx_fit], env_buf.a[idx_fit],
                             ns_sim_p, r_sim_p,
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
-                            n_epochs=20, patience=10)
+                            n_epochs=50, patience=15)
                 corrected = CorrectedWorldModel(wm_sim, residual)
                 model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
