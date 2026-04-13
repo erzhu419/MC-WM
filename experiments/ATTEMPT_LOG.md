@@ -180,3 +180,17 @@ Memory leak fix (deque maxlen, batch actions) does not affect convergence.
 - M_sim(frozen) + δ(128×2, warm-start, online refit) = ~4750 avg
 - vs c4 Direct M_real = 6792 (70% of upper bound)
 - vs c1 Raw Sim baseline = 875 (+440% improvement)
+
+---
+
+## c7: SINDy+NAU δ in MBPO pipeline → **5147** ✓ (beats c6 MLP!)
+
+SINDy discovers symbolic structure, NAU/NMU provides OOD bounds.
+- SINDy+NAU RMSE: 0.600 (vs MLP 0.575 — close)
+- Real return: 5147 (vs c6 MLP=4750, +8%)
+- c7/c4 = 76% (vs c6/c4 = 70%)
+- L_eff: 136→296 (NAU/NMU Lipschitz constant, live OOD monitoring)
+- Discovered terms: x0²:-0.113, x0·x1:-0.606, x0²:1.777 (gravity correction)
+
+**SINDy+NAU is a viable (and better!) replacement for MLP δ.**
+Adds interpretability + formal OOD bound at no performance cost.
