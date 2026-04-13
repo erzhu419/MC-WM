@@ -157,3 +157,14 @@ Remaining gap likely from:
 1. m_s still higher than c4 (0.55-0.65 vs 0.29-0.44)
 2. δ capacity: 128×2 (20k params) vs c4's full model 200×3 (120k params)
 3. model_buf=400 too small for meaningful augmentation
+
+---
+
+## c6v3: δ 200-dim + rollout_freq=50 → **572** ✗ (worse than c6v2!)
+
+Overfitting: larger δ (200×2) + frequent warm-start refit = overfit to each batch.
+m_s is lower (0.2-0.7) but performance wildly unstable (-433 to 2492).
+c6v2 (128×2) at 4840 remains the best residual configuration.
+
+**Conclusion**: δ capacity sweet spot is ~128 hidden. Larger overfits, smaller underfits.
+c6v2 = 4840 (71% of c4=6792) is the validated result for residual architecture.
