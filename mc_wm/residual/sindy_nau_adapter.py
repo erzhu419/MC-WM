@@ -83,6 +83,7 @@ class SINDyNAUAdapter:
         self._train_center = None
         self._fit_errors = None
         self._hypothesis_logs = []
+        self._loop_done = False  # True after first fit — refit skips loop
 
     def _sindy_fit_one_round(self, Theta, targets):
         """Fit SINDy coefficients (Ridge + STLSQ) on feature matrix Theta."""
@@ -115,10 +116,8 @@ class SINDyNAUAdapter:
     def fit(self, states, actions, sim_next_states, sim_rewards,
             real_next_states, real_rewards, n_epochs=100, batch_size=256, patience=20):
         """
-        Three-phase fit with self-hypothesis loop:
-        1. SINDy poly2 → fit → diagnose remainder
-        2. If structure remains: auto-expand features → re-fit (up to max_rounds)
-        3. NAU/NMU fine-tune on final discovered feature set
+        First call: self-hypothesis loop discovers features → NAU fine-tune.
+        Subsequent calls (refit): reuse discovered features, warm-start NAU only.
         """
         sim_deltas = sim_next_states - states
         real_deltas = real_next_states - states
@@ -131,7 +130,41 @@ class SINDyNAUAdapter:
         n_outputs = self.obs_dim + 1
         self._train_center = SA.mean(axis=0)
 
-        # ── Phase 1: Self-Hypothesis Loop
+        # ── REFIT path: skip loop, just re-fit SINDy + warm-start NAU
+        if self._loop_done:
+            Theta_full = self._build_full_theta(SA)
+            coefs, active, errors = self._sindy_fit_one_round(Theta_full, targets)
+            self._sindy_coefs = coefs
+            self._active_features = active
+            self._fit_errors = errors
+
+            # Warm-start NAU on new data
+            Theta_t = torch.FloatTensor(Theta_full).to(self.device)
+            tgt_t = torch.FloatTensor(targets).to(self.device)
+            perm = np.random.permutation(N)
+            n_val = max(int(N * 0.1), 50)
+            val_idx, train_idx = perm[:n_val], perm[n_val:]
+
+            best_val = float('inf'); best_epoch = 0
+            best_state = self._nau_head.state_dict().copy()
+            for epoch in range(n_epochs):
+                self._nau_head.train()
+                perm_t = np.random.permutation(train_idx)
+                for i in range(0, len(perm_t), batch_size):
+                    bi = perm_t[i:i+batch_size]
+                    pred = self._nau_head(Theta_t[bi])
+                    loss = nn.MSELoss()(pred, tgt_t[bi]) + 0.01 * self._nau_head.regularization_loss()
+                    self._nau_optimizer.zero_grad(); loss.backward(); self._nau_optimizer.step()
+                self._nau_head.eval()
+                with torch.no_grad():
+                    vl = float(nn.MSELoss()(self._nau_head(Theta_t[val_idx]), tgt_t[val_idx]))
+                    if vl < best_val: best_val = vl; best_epoch = epoch; best_state = self._nau_head.state_dict().copy()
+                if epoch - best_epoch >= patience: break
+            self._nau_head.load_state_dict(best_state)
+            self._trained = True
+            return
+
+        # ── FIRST FIT: Self-Hypothesis Loop
         self._library = ps.PolynomialLibrary(degree=2, include_bias=True)
         self._library.fit(SA)
         Theta = np.asarray(self._library.transform(SA))
@@ -316,6 +349,7 @@ class SINDyNAUAdapter:
         self._log(f"  NAU val MSE:        {nau_mse:.5f}")
         self._log(f"  NAU improvement:    {(1-nau_mse/sindy_mse)*100:.1f}%")
         self._log(f"  OOD bound L_eff:    {self._nau_head.L_eff:.4f}")
+        self._loop_done = True  # subsequent fit() calls skip the loop
 
     def _build_full_theta(self, SA):
         """Build full feature matrix including auto-expanded columns."""
