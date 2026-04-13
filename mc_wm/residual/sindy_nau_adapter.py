@@ -291,29 +291,34 @@ class SINDyNAUAdapter:
         all_names = list(self._feature_names) + extra_names
         self._feature_names = all_names
         # Save expand specs for predict-time reconstruction
-        self._expand_specs = []
-        for name in extra_names:
-            if name.endswith("_sq"):
-                j = int(name.split("x")[1].split("_")[0])
-                self._expand_specs.append({"type": "sq", "j": j})
-            elif name.endswith("_cube"):
-                j = int(name.split("x")[1].split("_")[0])
-                self._expand_specs.append({"type": "cube", "j": j})
-            elif name.endswith("_signmag"):
-                j = int(name.split("x")[1].split("_")[0])
-                self._expand_specs.append({"type": "signmag", "j": j})
-            elif "_x_a" in name:
-                parts = name.split("_x_a")
-                j = int(parts[0].split("x")[1])
-                k = self.obs_dim + int(parts[1])
-                self._expand_specs.append({"type": "cross", "j": j, "k": k})
-            elif name.startswith("mask_"):
-                parts = name.split("_lt")
-                j = int(parts[0].split("x")[1])
-                threshold = float(parts[1])
-                self._expand_specs.append({"type": "mask", "j": j, "threshold": threshold})
-            elif name == "t_norm":
-                self._expand_specs.append({"type": "tnorm"})
+        if self._env_type is not None:
+            # LLM oracle features — store env_type, recompute at predict time
+            self._expand_specs = [{"type": "llm_oracle", "env_type": self._env_type}]
+        else:
+            # Auto-expand features — parse names into specs
+            self._expand_specs = []
+            for name in extra_names:
+                if name.endswith("_sq"):
+                    j = int(name.split("x")[1].split("_")[0])
+                    self._expand_specs.append({"type": "sq", "j": j})
+                elif name.endswith("_cube"):
+                    j = int(name.split("x")[1].split("_")[0])
+                    self._expand_specs.append({"type": "cube", "j": j})
+                elif name.endswith("_signmag"):
+                    j = int(name.split("x")[1].split("_")[0])
+                    self._expand_specs.append({"type": "signmag", "j": j})
+                elif "_x_a" in name:
+                    parts = name.split("_x_a")
+                    j = int(parts[0].split("x")[1])
+                    k = self.obs_dim + int(parts[1])
+                    self._expand_specs.append({"type": "cross", "j": j, "k": k})
+                elif name.startswith("mask_"):
+                    parts = name.split("_lt")
+                    j = int(parts[0].split("x")[1])
+                    threshold = float(parts[1])
+                    self._expand_specs.append({"type": "mask", "j": j, "threshold": threshold})
+                elif name == "t_norm":
+                    self._expand_specs.append({"type": "tnorm"})
 
         n_active_total = sum(m.sum() for m in active)
         self._log(f"  SINDy final: {self._n_features} features, {n_active_total} active, "
@@ -380,12 +385,17 @@ class SINDyNAUAdapter:
         self._loop_done = True  # subsequent fit() calls skip the loop
 
     def _build_full_theta(self, SA):
-        """Build full feature matrix including auto-expanded columns."""
+        """Build full feature matrix including expanded columns."""
         Theta = np.asarray(self._library.transform(SA))
         if hasattr(self, '_expand_specs') and self._expand_specs:
             extra = []
             for spec in self._expand_specs:
-                if spec['type'] == 'sq':
+                if spec['type'] == 'llm_oracle':
+                    oracle = LLMOracle(env_type=spec['env_type'])
+                    cols, _, _ = oracle.suggest_features(
+                        SA, obs_dim=self.obs_dim, act_dim=self.act_dim)
+                    return np.hstack([Theta, cols])
+                elif spec['type'] == 'sq':
                     extra.append(SA[:, spec['j']] ** 2)
                 elif spec['type'] == 'cube':
                     extra.append(SA[:, spec['j']] ** 3)
