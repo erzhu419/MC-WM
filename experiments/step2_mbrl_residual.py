@@ -43,9 +43,9 @@ REPLAY_SIZE    = 100_000
 # Model-based (MBPO-tuned for HalfCheetah)
 ROLLOUT_HORIZON = 1       # single-step rollout — no error accumulation
 ROLLOUT_BATCH   = 400     # rollouts per generation cycle
-MODEL_BUF_MAX   = 100_000 # larger model buffer for more augmentation
+MODEL_BUF_MAX   = 50_000  # cap model buffer
 MODEL_TRAIN_FREQ = 1000   # retrain world model every N steps
-ROLLOUT_FREQ    = 50      # generate rollouts more frequently (was 250)
+ROLLOUT_FREQ    = 250     # generate rollouts every N env steps
 
 # RE-SAC
 N_CRITICS = 3; BETA_LCB = -2.0; HIDDEN = 256; LR = 3e-4
@@ -419,7 +419,7 @@ def main():
         ns_sim_pred, r_sim_pred = wm_sim.predict(s_real[:N_SIM_PRETRAIN],
                                                   a_real[:N_SIM_PRETRAIN], deterministic=True)
         # Match c4's model capacity: 200-dim hidden (same as M_sim/M_real)
-        residual = ResidualAdapter(obs_dim, act_dim, hidden=200, device=DEVICE)
+        residual = ResidualAdapter(obs_dim, act_dim, hidden=128, device=DEVICE)
         residual.fit(s_real, a_real,
                      ns_sim_pred, r_sim_pred,
                      s2_real, r_real,
