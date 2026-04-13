@@ -111,3 +111,21 @@ All states visited by trained policy are OOD for the gap detector. Gap signal �
 - Gap-dependent IW: 0% or negative (SINDy, MLP, or confidence — all fail)
 - Online refit: doesn't close the coverage gap fast enough
 - Actor constraint: hurts more than helps
+
+---
+
+## Step 2: Model-Based RL with Residual World Model
+
+### c3: M_sim + residual, frozen model, pure model training → 7.0
+### c4 (frozen): Direct M_real, frozen, pure model → 140.2
+### c4 (MBPO): Direct M_real, online refit, real env → **6792** ✓
+### c5: M_sim + residual, sim env, online δ refit → **-357** ✗
+
+Root cause of c5 failure: env_buf has sim transitions (sim reward/dynamics),
+model_buf has M_real transitions (corrected reward/dynamics).
+Q-function receives contradictory signals → cannot converge.
+
+c4 works because env_buf = real transitions → consistent with model_buf.
+
+**Core unsolved problem**: how to train in sim env but learn real-dynamics policy,
+when env_buf and model_buf have different reward/dynamics distributions.
