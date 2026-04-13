@@ -213,3 +213,25 @@ This is a term that poly2 library couldn't capture.
 Performance at step 15k: real=-65 (vs c7 without loop: 2277 at 15k)
 Slower due to 3-round hypothesis loop on every refit (every 1000 steps).
 Model accuracy good: m_s=0.267 at step 15k.
+
+---
+
+## c7+loop (fixed): Loop once → warm-start refit → **3999**
+
+- Initial loop: 3 rounds, discovered x1_sq, x1_cube, x1_signmag etc. (386 features)
+- NAU improvement: 14.9% over SINDy-only
+- Refit: warm-start only (no re-running loop), fast
+- Performance: 3999 (vs c7 no loop=5147, vs c6v2 MLP=4674)
+
+Self-hypothesis loop discovery is working (found cubic terms, cross-action terms).
+But 386 features makes warm-start refit harder → L_eff grows to 1032 (unstable NMU).
+Expansion adds value for interpretability but slightly hurts online performance.
+
+**Summary table:**
+| Config | Return | Notes |
+|--------|--------|-------|
+| c1 Raw Sim | 875 | baseline |
+| c6v2 MLP δ (128×2) | 4674 | best MLP |
+| c7 SINDy+NAU (no loop) | 5147 | best overall |
+| c7+loop (fixed) | 3999 | loop adds features but hurts refit stability |
+| c4 Direct M_real | 6792 | upper bound |
