@@ -528,8 +528,9 @@ def main():
 
         log(f"  Training SINDy+NAU residual δ...")
         _env_type = "gravity_cheetah" if mode == "c8" else None
+        _max_rounds = 1 if mode == "c7" else 3  # c7: no expansion (poly2 only)
         residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
-                                    env_type=_env_type)
+                                    env_type=_env_type, max_rounds=_max_rounds)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20)
 
