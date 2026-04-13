@@ -143,3 +143,17 @@ First successful residual architecture result!
 
 Gap c6 vs c4: m_s=0.98 (c6) vs 0.29 (c4) — residual refit quality lower.
 Possible fixes: keep δ weights across refits, larger δ net, less frequent full retrain.
+
+---
+
+## c6v2: Warm-start δ + 128×2 + 50 epochs → **4840** ✓
+
+Fixes vs c6: keep δ weights across refits, larger net, more epochs.
+- m_s: 0.43→0.65 (vs c6旧 0.53→0.98, vs c4 0.37→0.29)
+- Last 3: 4840 (c4的71%, vs c6旧的55%)
+- Gap c6v2 vs c4: 1952 (from 3054)
+
+Remaining gap likely from:
+1. m_s still higher than c4 (0.55-0.65 vs 0.29-0.44)
+2. δ capacity: 128×2 (20k params) vs c4's full model 200×3 (120k params)
+3. model_buf=400 too small for meaningful augmentation
