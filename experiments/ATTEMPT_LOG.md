@@ -129,3 +129,17 @@ c4 works because env_buf = real transitions → consistent with model_buf.
 
 **Core unsolved problem**: how to train in sim env but learn real-dynamics policy,
 when env_buf and model_buf have different reward/dynamics distributions.
+
+---
+
+## c6: MBPO with M_sim + residual δ (real env, online δ refit) → **3738** ✓
+
+First successful residual architecture result!
+- M_sim frozen (pretrained on 50k sim), δ refitted online on real data
+- M_real = M_sim + δ, RMSE = 0.575 (vs c4 direct M_real = 0.553)
+- Residual improvement: 84.6% (3.74 → 0.575)
+- Real return: 3738 (+327% vs c1 baseline 875)
+- c4 (direct M_real): 6792 → c6 is 55% of c4
+
+Gap c6 vs c4: m_s=0.98 (c6) vs 0.29 (c4) — residual refit quality lower.
+Possible fixes: keep δ weights across refits, larger δ net, less frequent full retrain.
