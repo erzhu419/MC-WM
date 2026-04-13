@@ -29,6 +29,7 @@ from mc_wm.networks.nau_nmu import SymbolicResidualHead
 from mc_wm.self_audit.diagnosis import DiagnosisBattery
 from mc_wm.self_audit.auto_expand import AutoExpander
 from mc_wm.self_audit.llm_oracle import LLMOracle
+from mc_wm.self_audit.orthogonal_expand import OrthogonalExpander
 
 
 class SINDyNAUAdapter:
@@ -282,29 +283,25 @@ class SINDyNAUAdapter:
                 self._log(f"    ⊘ Max rounds reached")
                 break
 
-            # Auto-expand: add new features based on diagnosis
-            self._log(f"    → Expanding features based on {n_fired} diagnoses...")
+            # Orthogonal expansion: find features in orthogonal complement of Θ
+            self._log(f"    → Orthogonal feature discovery ({n_fired} dims with structure)...")
             for ds in diag_summary[:3]:
                 self._log(f"      {ds}")
 
-            new_lib, metadata = self._expander.expand(
-                results=diagnoses, current_library=self._library,
-                SA=SA, remainder=remainder_s,
-                steps=np.arange(N),
-            )
-            new_extra = metadata.get("extra_columns")
-            if new_extra is not None and new_extra.shape[1] > 0:
-                new_names = metadata.get("extra_names", [])
+            orth_expander = OrthogonalExpander(self.obs_dim, self.act_dim)
+            new_extra, new_names, orth_diag = orth_expander.expand(
+                SA, Theta_full, remainder_s, log_fn=self._log)
+
+            if len(new_names) > 0:
                 if extra_cols is not None:
                     extra_cols = np.hstack([extra_cols, new_extra])
                 else:
                     extra_cols = new_extra
                 extra_names.extend(new_names)
-                self._log(f"    Added {new_extra.shape[1]} new features: {new_names[:5]}")
             else:
-                log_entry["reason"] = "no_expansion"
+                log_entry["reason"] = "no_orthogonal_features"
                 self._hypothesis_logs.append(log_entry)
-                self._log(f"    No new features to add, stopping")
+                self._log(f"    No orthogonal features found, stopping")
                 break
 
             log_entry["reason"] = "expanded"
@@ -320,33 +317,14 @@ class SINDyNAUAdapter:
         self._feature_names = all_names
         # Save expand specs for predict-time reconstruction
         if self._env_type is not None:
-            # LLM oracle features — store env_type, recompute at predict time
             self._expand_specs = [{"type": "llm_oracle", "env_type": self._env_type}]
         else:
-            # Auto-expand features — parse names into specs
-            self._expand_specs = []
-            for name in extra_names:
-                if name.endswith("_sq"):
-                    j = int(name.split("x")[1].split("_")[0])
-                    self._expand_specs.append({"type": "sq", "j": j})
-                elif name.endswith("_cube"):
-                    j = int(name.split("x")[1].split("_")[0])
-                    self._expand_specs.append({"type": "cube", "j": j})
-                elif name.endswith("_signmag"):
-                    j = int(name.split("x")[1].split("_")[0])
-                    self._expand_specs.append({"type": "signmag", "j": j})
-                elif "_x_a" in name:
-                    parts = name.split("_x_a")
-                    j = int(parts[0].split("x")[1])
-                    k = self.obs_dim + int(parts[1])
-                    self._expand_specs.append({"type": "cross", "j": j, "k": k})
-                elif name.startswith("mask_"):
-                    parts = name.split("_lt")
-                    j = int(parts[0].split("x")[1])
-                    threshold = float(parts[1])
-                    self._expand_specs.append({"type": "mask", "j": j, "threshold": threshold})
-                elif name == "t_norm":
-                    self._expand_specs.append({"type": "tnorm"})
+            # Orthogonal expand: store as "regenerate" spec — use OrthogonalExpander
+            # at predict time to regenerate the same candidates by name
+            self._expand_specs = [{"type": "orthogonal", "names": extra_names}]
+            # Also store obs/act dims for reconstruction
+            self._expand_obs_dim = self.obs_dim
+            self._expand_act_dim = self.act_dim
 
         n_active_total = sum(m.sum() for m in active)
         self._log(f"  SINDy final: {self._n_features} features, {n_active_total} active, "
@@ -416,28 +394,23 @@ class SINDyNAUAdapter:
         """Build full feature matrix including expanded columns."""
         Theta = np.asarray(self._library.transform(SA))
         if hasattr(self, '_expand_specs') and self._expand_specs:
-            extra = []
             for spec in self._expand_specs:
                 if spec['type'] == 'llm_oracle':
                     oracle = LLMOracle(env_type=spec['env_type'])
                     cols, _, _ = oracle.suggest_features(
                         SA, obs_dim=self.obs_dim, act_dim=self.act_dim)
                     return np.hstack([Theta, cols])
-                elif spec['type'] == 'sq':
-                    extra.append(SA[:, spec['j']] ** 2)
-                elif spec['type'] == 'cube':
-                    extra.append(SA[:, spec['j']] ** 3)
-                elif spec['type'] == 'signmag':
-                    c = SA[:, spec['j']]
-                    extra.append(c * np.abs(c))
-                elif spec['type'] == 'cross':
-                    extra.append(SA[:, spec['j']] * SA[:, spec['k']])
-                elif spec['type'] == 'mask':
-                    extra.append((SA[:, spec['j']] < spec['threshold']).astype(np.float64))
-                elif spec['type'] == 'tnorm':
-                    extra.append(np.linspace(0, 1, len(SA)))
-            if extra:
-                Theta = np.hstack([Theta, np.column_stack(extra)])
+                elif spec['type'] == 'orthogonal':
+                    # Regenerate candidates by name
+                    oe = OrthogonalExpander(self.obs_dim, self.act_dim)
+                    all_cands, all_names = oe._generate_candidates(SA, len(SA))
+                    selected_names = set(spec['names'])
+                    extra = []
+                    for c, n in zip(all_cands, all_names):
+                        if n in selected_names:
+                            extra.append(c)
+                    if extra:
+                        Theta = np.hstack([Theta, np.column_stack(extra)])
         return Theta
 
     def predict_correction(self, states, actions):
