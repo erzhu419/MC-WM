@@ -210,10 +210,12 @@ class SINDyNAUAdapter:
             # Quality gate
             quality_passed = eps_max < self.eps_threshold
 
-            # Diagnose remainder (state dims only)
-            sindy_pred_s = Theta_full @ coefs[:self.obs_dim].T  # (N, obs_dim)
+            # Diagnose remainder (subsample for speed — diagnosis is O(N²))
+            sindy_pred_s = Theta_full @ coefs[:self.obs_dim].T
             remainder_s = delta_correction_s - sindy_pred_s
-            diagnoses = self._battery.run(remainder_s, SA)
+            diag_n = min(2000, N)
+            diag_idx = np.random.choice(N, diag_n, replace=False)
+            diagnoses = self._battery.run(remainder_s[diag_idx], SA[diag_idx])
             any_structure = any(d.any_fired() for d in diagnoses)
 
             # Count active
