@@ -475,7 +475,8 @@ class SINDyNAUAdapter:
     def get_active_terms(self):
         """Return discovered symbolic terms per dimension."""
         result = {}
-        for dim in range(self.obs_dim + 1):
+        n_dims = len(self._active_features) if self._active_features else 0
+        for dim in range(n_dims):
             name = f"Δs_{dim}" if dim < self.obs_dim else "Δr"
             active = [(self._feature_names[j], float(self._sindy_coefs[dim, j]))
                       for j in range(self._n_features)
