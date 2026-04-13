@@ -28,6 +28,7 @@ from copy import deepcopy
 from mc_wm.networks.nau_nmu import SymbolicResidualHead
 from mc_wm.self_audit.diagnosis import DiagnosisBattery
 from mc_wm.self_audit.auto_expand import AutoExpander
+from mc_wm.self_audit.llm_oracle import LLMOracle
 
 
 class SINDyNAUAdapter:
@@ -48,8 +49,9 @@ class SINDyNAUAdapter:
     def __init__(self, obs_dim, act_dim, sindy_threshold=0.05, sindy_alpha=0.05,
                  nau_hidden=32, lr=1e-3, device="cpu",
                  max_rounds=3, eps_threshold=0.05, diagnosis_alpha=0.05,
-                 log_fn=None):
+                 log_fn=None, env_type=None):
         self._log = log_fn or (lambda msg: print(msg))
+        self._env_type = env_type  # if set, use LLM oracle instead of auto-expand
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.input_dim = obs_dim + act_dim
@@ -164,17 +166,43 @@ class SINDyNAUAdapter:
             self._trained = True
             return
 
-        # ── FIRST FIT: Self-Hypothesis Loop
+        # ── FIRST FIT
         self._library = ps.PolynomialLibrary(degree=2, include_bias=True)
         self._library.fit(SA)
         Theta = np.asarray(self._library.transform(SA))
         self._feature_names = list(self._library.get_feature_names())
 
-        extra_cols = None  # accumulated extra columns from auto-expand
+        extra_cols = None
         extra_names = []
         self._hypothesis_logs = []
 
-        for round_num in range(1, self.max_rounds + 1):
+        # If LLM oracle is available: use physics-informed features instead of loop
+        if self._env_type is not None:
+            oracle = LLMOracle(env_type=self._env_type, log_fn=self._log)
+            oracle_cols, oracle_names, _ = oracle.suggest_features(
+                SA, obs_dim=self.obs_dim, act_dim=self.act_dim)
+            if oracle_cols.shape[1] > 0:
+                extra_cols = oracle_cols
+                extra_names = oracle_names
+                Theta_full = np.hstack([Theta, extra_cols])
+                coefs, active, errors = self._sindy_fit_one_round(Theta_full, targets)
+                self._log(f"  [LLM Oracle] {Theta_full.shape[1]} features "
+                          f"({Theta.shape[1]} poly2 + {len(oracle_names)} physics), "
+                          f"eps_max={errors.max():.5f}")
+                # Also run diagnosis for reporting
+                sindy_pred_s = Theta_full @ coefs[:self.obs_dim].T
+                remainder_s = delta_correction_s - sindy_pred_s
+                diagnoses = self._battery.run(remainder_s, SA)
+                n_fired = sum(1 for d in diagnoses if d.any_fired())
+                self._log(f"  Remaining structure after LLM features: {n_fired}/{self.obs_dim} dims")
+                self._hypothesis_logs.append({
+                    "round": 1, "method": "llm_oracle",
+                    "n_features": Theta_full.shape[1], "eps_max": float(errors.max()),
+                    "n_diagnosis_fired": n_fired,
+                })
+        # Run hypothesis loop only if LLM oracle was NOT used
+        if extra_cols is None:
+          for round_num in range(1, self.max_rounds + 1):
             # Build full feature matrix
             if extra_cols is not None and extra_cols.shape[1] > 0:
                 Theta_full = np.hstack([Theta, extra_cols])

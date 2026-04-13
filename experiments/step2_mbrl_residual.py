@@ -143,7 +143,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -506,7 +506,7 @@ def main():
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
 
-    elif mode == "c7":
+    elif mode in ("c7", "c8"):
         # ── c6 but with SINDy+NAU instead of MLP δ
         # Tests: interpretable symbolic residual vs black-box MLP
         np.random.seed(SEED); torch.manual_seed(SEED)
@@ -527,7 +527,9 @@ def main():
         ns_sim_pred, r_sim_pred = wm_sim.predict(s_real, a_real, deterministic=True)
 
         log(f"  Training SINDy+NAU residual δ...")
-        residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log)
+        _env_type = "gravity_cheetah" if mode == "c8" else None
+        residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
+                                    env_type=_env_type)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20)
 

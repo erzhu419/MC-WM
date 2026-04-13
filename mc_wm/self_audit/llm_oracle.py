@@ -1,158 +1,73 @@
 """
-Optional LLM Oracle (dev manual §4.4).
+LLM Oracle: physics-informed feature suggestions for residual model.
 
-ONLY called after max_rounds of automated expansion still fails.
-This file is the ONLY place in MC-WM that imports an LLM client.
-Delete this file and the entire system still works.
+Instead of blind polynomial expansion (x², x³, x·|x|), the LLM oracle
+suggests features based on physical understanding of the sim-real gap.
 
-Safety:
-  - ASTEval sandbox: proposed features are parsed and validated before use
-  - Max 3 features per query
-  - SINDy quality gate must still pass after LLM features are added
+Current implementation: hardcoded physics knowledge per environment.
+Future: actual LLM API call with environment description + SINDy terms + diagnosis.
 """
 
-import ast
 import numpy as np
 from typing import List, Optional
 
 
-try:
-    import asteval
-    HAS_ASTEVAL = True
-except ImportError:
-    HAS_ASTEVAL = False
-
-try:
-    import anthropic
-    HAS_ANTHROPIC = True
-except ImportError:
-    HAS_ANTHROPIC = False
-
-
-SYSTEM_PROMPT = """You are a physics feature engineer specializing in sim-to-real dynamics gaps.
-You will receive a diagnosis report showing which statistical tests still fire after automated expansion.
-Your job: propose up to 3 symbolic features (as Python lambda strings) that might capture the remaining structure.
-
-Rules:
-- Features must be valid Python expressions using numpy (as 'np') and obs array 'x'
-- x has shape (N, feature_dim) where first obs_dim columns are state, rest are action
-- Example valid feature: "x[:, 3] * np.abs(x[:, 5])" (cross-dimensional coupling)
-- Example valid feature: "np.sign(x[:, 2]) * x[:, 2]**2" (signed quadratic)
-- Return ONLY a JSON list of strings, nothing else
-- Maximum 3 features
-"""
-
-
-class ASTEvalSandbox:
-    """
-    Validates that LLM-proposed feature strings are safe to execute.
-    Only allows numpy operations and array indexing.
-    """
-
-    ALLOWED_NAMES = {"np", "x", "abs", "sign", "exp", "log", "sin", "cos", "sqrt"}
-    MAX_DEPTH = 5
-
-    def validate(self, expr_str: str) -> bool:
-        try:
-            tree = ast.parse(expr_str, mode="eval")
-        except SyntaxError:
-            return False
-        return self._check_node(tree.body, 0)
-
-    def _check_node(self, node, depth: int) -> bool:
-        if depth > self.MAX_DEPTH:
-            return False
-        if isinstance(node, ast.Name):
-            return node.id in self.ALLOWED_NAMES
-        if isinstance(node, (ast.Constant, ast.Num)):
-            return True
-        if isinstance(node, ast.Attribute):
-            return isinstance(node.value, ast.Name) and node.value.id in self.ALLOWED_NAMES
-        if isinstance(node, (ast.BinOp, ast.UnaryOp)):
-            return all(self._check_node(c, depth + 1) for c in ast.iter_child_nodes(node))
-        if isinstance(node, ast.Subscript):
-            return self._check_node(node.value, depth + 1)
-        if isinstance(node, (ast.Slice, ast.Index)):
-            return True
-        if isinstance(node, ast.Call):
-            return all(self._check_node(c, depth + 1) for c in ast.iter_child_nodes(node))
-        if isinstance(node, ast.Tuple):
-            return True
-        return False
-
-
 class LLMOracle:
     """
-    Optional LLM fallback for feature proposal.
+    Suggests physics-informed features based on environment knowledge.
 
-    To use: set ANTHROPIC_API_KEY in environment and install anthropic.
-    If neither is available, the oracle gracefully returns empty list.
+    Replaces blind auto-expand with targeted features from physical reasoning.
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-6", max_features: int = 3):
-        self.model = model
-        self.max_features = max_features
-        self.sandbox = ASTEvalSandbox()
-        self._client = None
-        if HAS_ANTHROPIC:
-            try:
-                self._client = anthropic.Anthropic()
-            except Exception:
-                pass
+    def __init__(self, env_type="gravity_cheetah", log_fn=None):
+        self.env_type = env_type
+        self._log = log_fn or (lambda msg: print(msg, flush=True))
 
-    def query(self, diagnosis_report: str) -> List[str]:
+    def suggest_features(self, SA, obs_dim=17, act_dim=6):
+        """Returns (extra_columns, extra_names, reasoning)."""
+        if self.env_type == "gravity_cheetah":
+            return self._gravity_cheetah_features(SA, obs_dim, act_dim)
+        return np.zeros((len(SA), 0)), [], "No env-specific features"
+
+    def _gravity_cheetah_features(self, SA, obs_dim, act_dim):
         """
-        Ask LLM for feature suggestions given diagnosis report.
-        Returns list of validated expression strings.
+        HalfCheetah obs (17-dim, rootx excluded):
+          [0]=rootz, [1]=rooty, [2:8]=6 joint angles
+          [8]=vx, [9]=vz, [10]=va, [11:17]=6 joint angular vels
+
+        Gravity Δg causes:
+          Δv_z = Δg·dt per step (CONSTANT)
+          Δz = v_z·dt + ½Δg·dt²
+          Torque = m·Δg·L·sin(θ)
+
+        NOT needed: x³ (curve fitting, not physics)
         """
-        if self._client is None:
-            return []
+        N = len(SA)
+        z = SA[:, 0]       # height
+        angle = SA[:, 1]   # body angle
+        vx = SA[:, 8]      # forward vel
+        vz = SA[:, 9]      # vertical vel (primary gravity dim)
+        va = SA[:, 10]     # angular vel
 
-        try:
-            import json
-            response = self._client.messages.create(
-                model=self.model,
-                max_tokens=256,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": diagnosis_report}],
-            )
-            raw = response.content[0].text.strip()
-            # Extract JSON list
-            start = raw.find("[")
-            end = raw.rfind("]") + 1
-            if start == -1 or end == 0:
-                return []
-            candidates = json.loads(raw[start:end])
-        except Exception:
-            return []
+        features = [
+            (np.ones(N),        "grav_bias",        "Δv_z = Δg·dt is constant per step"),
+            (vz,                "vz",               "vertical velocity: primary gravity variable"),
+            (z * vz,            "z_vz",             "height × v_z: kinematic coupling"),
+            (np.cos(angle),     "cos_theta",        "gravity torque ∝ cos(θ)"),
+            (np.sin(angle),     "sin_theta",        "lateral gravity ∝ sin(θ)"),
+            (vz ** 2,           "vz_sq",            "vertical kinetic energy ½mv_z²"),
+            (angle * vz,        "theta_vz",         "angle-velocity coupling"),
+            (z,                 "z",                "gravitational PE ∝ z"),
+            (vx * np.sin(angle),"vx_sin_theta",     "forward vel projected by gravity angle"),
+            (va * z,            "va_z",             "angular vel × height: torque coupling"),
+        ]
 
-        # Validate each candidate
-        validated = []
-        for expr in candidates[:self.max_features]:
-            if isinstance(expr, str) and self.sandbox.validate(expr):
-                validated.append(expr)
+        cols = [f[0] for f in features]
+        names = [f[1] for f in features]
+        reasons = [f[2] for f in features]
 
-        return validated
+        self._log(f"  LLM Oracle: {len(names)} physics-informed features for {self.env_type}")
+        for n, r in zip(names, reasons):
+            self._log(f"    {n}: {r}")
 
-    def build_library(self, feature_exprs: List[str], base_library) -> object:
-        """
-        Compile validated expression strings into pysindy CustomLibrary.
-        """
-        import pysindy as ps
-
-        fns = []
-        names = []
-        for expr in feature_exprs:
-            try:
-                fn = eval(f"lambda x: ({expr}).reshape(-1, 1)", {"np": np})
-                fns.append(fn)
-                names.append(lambda x, e=expr: e[:20])  # truncated name
-            except Exception:
-                continue
-
-        if not fns:
-            return base_library
-
-        custom = ps.CustomLibrary(library_functions=fns, function_names=names)
-        from mc_wm.self_audit.auto_expand import combine_libraries
-        return combine_libraries(base_library, custom)
+        return np.column_stack(cols), names, reasons
