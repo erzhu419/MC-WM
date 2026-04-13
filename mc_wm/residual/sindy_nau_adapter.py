@@ -189,16 +189,10 @@ class SINDyNAUAdapter:
                 self._log(f"  [LLM Oracle] {Theta_full.shape[1]} features "
                           f"({Theta.shape[1]} poly2 + {len(oracle_names)} physics), "
                           f"eps_max={errors.max():.5f}")
-                # Also run diagnosis for reporting
-                sindy_pred_s = Theta_full @ coefs[:self.obs_dim].T
-                remainder_s = delta_correction_s - sindy_pred_s
-                diagnoses = self._battery.run(remainder_s, SA)
-                n_fired = sum(1 for d in diagnoses if d.any_fired())
-                self._log(f"  Remaining structure after LLM features: {n_fired}/{self.obs_dim} dims")
+                # Skip diagnosis (too slow on 50k data, and LLM oracle doesn't need it)
                 self._hypothesis_logs.append({
                     "round": 1, "method": "llm_oracle",
                     "n_features": Theta_full.shape[1], "eps_max": float(errors.max()),
-                    "n_diagnosis_fired": n_fired,
                 })
         # Run hypothesis loop only if LLM oracle was NOT used
         if extra_cols is None:
