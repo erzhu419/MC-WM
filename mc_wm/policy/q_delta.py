@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from collections import deque
 from copy import deepcopy
 import math
 
@@ -85,9 +86,9 @@ class QDeltaModule:
 
         self.optimizer = optim.Adam(self.q_delta.parameters(), lr=lr)
 
-        # Diagnostics
-        self._loss_history = []
-        self._penalty_history = []
+        # Diagnostics (bounded to prevent unbounded memory growth)
+        self._loss_history = deque(maxlen=1000)
+        self._penalty_history = deque(maxlen=1000)
 
     def pretrain(self, trajectories, n_epochs=50, batch_size=256):
         """
@@ -99,23 +100,30 @@ class QDeltaModule:
                 'gap_reward': (T,) — ||s_real_next - s_sim_next||² per step
                 'done': (T,) — episode boundaries
         """
-        # Flatten all trajectories into transitions
-        all_s, all_a, all_s2, all_a2, all_r, all_d = [], [], [], [], [], []
+        # Flatten all trajectories into transitions using numpy concatenate
+        # (avoids building large Python lists before np.array conversion)
+        segs_s, segs_a, segs_s2, segs_a2, segs_r, segs_d = [], [], [], [], [], []
         for traj in trajectories:
-            s, a, gr, done = traj['s'], traj['a'], traj['gap_reward'], traj['done']
-            T = len(s)
-            for t in range(T - 1):
-                all_s.append(s[t]); all_a.append(a[t])
-                all_s2.append(s[t+1]); all_a2.append(a[t+1])
-                all_r.append(gr[t]); all_d.append(done[t])
+            s, a, gr, done = (np.asarray(traj['s']), np.asarray(traj['a']),
+                              np.asarray(traj['gap_reward']), np.asarray(traj['done']))
+            segs_s.append(s[:-1]); segs_a.append(a[:-1])
+            segs_s2.append(s[1:]); segs_a2.append(a[1:])
+            segs_r.append(gr[:-1]); segs_d.append(done[:-1])
 
-        N = len(all_s)
-        s_arr = torch.FloatTensor(np.array(all_s)).to(self.device)
-        a_arr = torch.FloatTensor(np.array(all_a)).to(self.device)
-        s2_arr = torch.FloatTensor(np.array(all_s2)).to(self.device)
-        a2_arr = torch.FloatTensor(np.array(all_a2)).to(self.device)
-        r_arr = torch.FloatTensor(np.array(all_r)).unsqueeze(-1).to(self.device)
-        d_arr = torch.FloatTensor(np.array(all_d)).unsqueeze(-1).to(self.device)
+        s_np   = np.concatenate(segs_s,  axis=0)
+        a_np   = np.concatenate(segs_a,  axis=0)
+        s2_np  = np.concatenate(segs_s2, axis=0)
+        a2_np  = np.concatenate(segs_a2, axis=0)
+        r_np   = np.concatenate(segs_r,  axis=0)
+        d_np   = np.concatenate(segs_d,  axis=0)
+        N = len(s_np)
+
+        s_arr  = torch.FloatTensor(s_np).to(self.device)
+        a_arr  = torch.FloatTensor(a_np).to(self.device)
+        s2_arr = torch.FloatTensor(s2_np).to(self.device)
+        a2_arr = torch.FloatTensor(a2_np).to(self.device)
+        r_arr  = torch.FloatTensor(r_np).unsqueeze(-1).to(self.device)
+        d_arr  = torch.FloatTensor(d_np).unsqueeze(-1).to(self.device)
 
         print(f"  QΔ pretrain: {N} transitions, {n_epochs} epochs, K={self.K}")
 
@@ -219,7 +227,7 @@ class QDeltaModule:
     def get_diagnostics(self):
         """Return training diagnostics."""
         return {
-            "loss_history": self._loss_history.copy(),
-            "penalty_history": self._penalty_history.copy(),
+            "loss_history": list(self._loss_history),
+            "penalty_history": list(self._penalty_history),
             "frozen": self._frozen,
         }

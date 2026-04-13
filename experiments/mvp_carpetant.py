@@ -7,6 +7,7 @@ Key: Cal-QL floor prevents sim Q-targets from collapsing.
 运行: conda run -n MC-WM python3 -u experiments/mvp_carpetant.py
 """
 import sys, os, warnings
+from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 warnings.filterwarnings('ignore')
 
@@ -129,7 +130,7 @@ class GatedCorrectedEnv:
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
         self._train_center = None; self._L_eff = 0.05
-        self._gate_history = []; self._last_obs = None; self._g_smooth = None
+        self._gate_history = deque(maxlen=100_000); self._last_obs = None; self._g_smooth = None
     def set_train_center(self, SA):
         self._train_center = SA.mean(axis=0)
     def _gate(self, s, a):
@@ -158,7 +159,7 @@ class GatedCorrectedEnv:
         return obs, reward, term, trunc, info
     def gate_stats(self):
         if not self._gate_history: return {}
-        h = np.array(self._gate_history)
+        h = np.array(list(self._gate_history))
         return {"mean": float(h.mean()), "median": float(np.median(h)),
                 "frac_zero": float((h < 0.01).mean())}
     def close(self): self._env.close()

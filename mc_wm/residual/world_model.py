@@ -100,7 +100,7 @@ class WorldModelEnsemble:
 
         best_val_loss = [float('inf')] * self.K
         best_epoch = [0] * self.K
-        best_state = [m.state_dict() for m in self.models]
+        best_state = [m.state_dict().copy() for m in self.models]
 
         for epoch in range(n_epochs):
             # Train
