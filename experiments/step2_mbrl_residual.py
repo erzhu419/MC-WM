@@ -535,13 +535,16 @@ def main():
 
         corrected = CorrectedWorldModel(wm_sim, residual)
 
-        # Validate
+        # Validate state + reward correction
         ns_corr, r_corr = corrected.predict(s_real[:2000], a_real[:2000], deterministic=True)
         corr_rmse = np.sqrt(np.mean((ns_corr - s2_real[:2000]) ** 2))
         direct_rmse = np.sqrt(np.mean((ns_sim_pred[:2000] - s2_real[:2000]) ** 2))
-        log(f"  M_sim → real RMSE: {direct_rmse:.4f}")
-        log(f"  SINDy+NAU M_real RMSE: {corr_rmse:.4f}")
-        log(f"  Improvement: {(1-corr_rmse/direct_rmse)*100:.1f}%")
+        r_corr_rmse = np.sqrt(np.mean((r_corr - r_real[:2000]) ** 2))
+        r_sim_rmse = np.sqrt(np.mean((r_sim_pred[:2000] - r_real[:2000]) ** 2))
+        log(f"  State: M_sim→real RMSE={direct_rmse:.4f} → M_real RMSE={corr_rmse:.4f} "
+            f"({(1-corr_rmse/direct_rmse)*100:.1f}% improvement)")
+        log(f"  Reward: M_sim→real RMSE={r_sim_rmse:.4f} → M_real RMSE={r_corr_rmse:.4f} "
+            f"({(1-r_corr_rmse/max(r_sim_rmse,1e-8))*100:.1f}% improvement)")
 
         # Print discovered symbolic structure
         terms = residual.get_active_terms()
@@ -607,11 +610,12 @@ def main():
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
-                    ns_test, _ = corrected.predict(
+                    ns_test, r_test = corrected.predict(
                         env_buf.s[idx], env_buf.a[idx], deterministic=True)
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
+                    r_err = np.sqrt(np.mean((r_test - env_buf.r[idx].squeeze()) ** 2))
                     ood = residual.get_ood_bound(env_buf.s[idx], env_buf.a[idx]).mean()
-                    diag = f"  m_s={s_err:.3f} ood_bound={ood:.3f} L={residual._nau_head.L_eff:.3f}"
+                    diag = f"  m_s={s_err:.3f} m_r={r_err:.3f} L={residual._nau_head.L_eff:.3f}"
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
