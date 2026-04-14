@@ -143,7 +143,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -506,7 +506,7 @@ def main():
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
 
-    elif mode in ("c7", "c8"):
+    elif mode in ("c7", "c8", "c9"):
         # ── c6 but with SINDy+NAU instead of MLP δ
         # Tests: interpretable symbolic residual vs black-box MLP
         np.random.seed(SEED); torch.manual_seed(SEED)
@@ -591,15 +591,37 @@ def main():
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
                 if step % ROLLOUT_FREQ == 0:
-                    start_states = env_buf.sample_states(ROLLOUT_BATCH)
+                    # Sample start states from env_buf (with their real next-states)
+                    s_idx = np.random.randint(0, env_buf.size, ROLLOUT_BATCH)
+                    start_states = env_buf.s[s_idx]
                     actions = np.array([agent.get_action(ss, deterministic=False)
                                        for ss in start_states])
                     ns_pred, r_pred = corrected.predict(
                         start_states, actions, deterministic=False)
-                    model_buf.add_batch(
-                        start_states, actions,
-                        r_pred.reshape(-1, 1), ns_pred,
-                        np.zeros((ROLLOUT_BATCH, 1), np.float32))
+
+                    if mode == "c9":
+                        # QΔ: compute per-transition model confidence
+                        # Compare M_real prediction with actual real next-state
+                        # for the SAME (s,a) pair from env_buf
+                        ns_real = env_buf.s2[s_idx]  # ground truth
+                        r_real_gt = env_buf.r[s_idx].squeeze()
+                        per_s_err = np.mean((ns_pred - ns_real) ** 2, axis=1)  # (B,)
+                        per_r_err = (r_pred - r_real_gt) ** 2
+                        # Weight: high error → low weight
+                        # w = 1/(1 + error/τ), τ calibrated to median error
+                        tau_s = float(np.median(per_s_err)) + 1e-8
+                        w = 1.0 / (1.0 + per_s_err / tau_s)
+                        # Scale reward by weight (model-confident transitions get full reward)
+                        r_weighted = r_pred * w
+                        model_buf.add_batch(
+                            start_states, actions,
+                            r_weighted.reshape(-1, 1), ns_pred,
+                            np.zeros((ROLLOUT_BATCH, 1), np.float32))
+                    else:
+                        model_buf.add_batch(
+                            start_states, actions,
+                            r_pred.reshape(-1, 1), ns_pred,
+                            np.zeros((ROLLOUT_BATCH, 1), np.float32))
 
                 agent.update(env_buf)
                 if model_buf.size >= BATCH_SIZE:
