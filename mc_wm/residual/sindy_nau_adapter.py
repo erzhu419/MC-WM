@@ -89,6 +89,12 @@ class SINDyNAUAdapter:
         ).to(device)
         self._reward_opt = optim.Adam(self._reward_net.parameters(), lr=lr, weight_decay=1e-4)
 
+        # SGD-based coefficient layer for smooth online refit
+        # Initialized after first fit with discovered sparsity pattern
+        self._coef_layer = None  # nn.Linear(n_features, n_outputs, bias=False)
+        self._coef_optimizer = None
+        self._active_mask = None  # boolean mask from STLSQ sparsity
+
         # Training state
         self._trained = False
         self._train_center = None
@@ -165,41 +171,58 @@ class SINDyNAUAdapter:
         self._reward_net.load_state_dict(best_r_state)
         self._log(f"  Reward MLP: val MSE={best_r_val:.5f} (separate from state SINDy)")
 
-        # ── REFIT path: skip loop, just re-fit SINDy + warm-start NAU
+        # ── REFIT path: SGD warm-start (not STLSQ re-solve)
+        # Sparsity pattern is FIXED from initial loop. Only coefficient VALUES update.
+        # This gives smooth updates — no coefficient jumps — NAU stays stable.
         if self._loop_done:
             Theta_full = self._build_full_theta(SA)
-            coefs, active, errors = self._sindy_fit_one_round(Theta_full, targets)
-            self._sindy_coefs = coefs
-            self._active_features = active
-            self._fit_errors = errors
-
-            # Warm-start NAU on new data
             Theta_t = torch.FloatTensor(Theta_full).to(self.device)
             tgt_t = torch.FloatTensor(targets).to(self.device)
+
+            # SGD update on coefficient layer (smooth, no batch re-solve)
             perm = np.random.permutation(N)
             n_val = max(int(N * 0.1), 50)
             val_idx, train_idx = perm[:n_val], perm[n_val:]
 
+            for epoch in range(min(n_epochs, 30)):  # fewer epochs for refit
+                self._coef_layer.train()
+                perm_t = np.random.permutation(train_idx)
+                for i in range(0, len(perm_t), batch_size):
+                    bi = perm_t[i:i+batch_size]
+                    # Apply sparsity mask: zero out gradients for inactive features
+                    pred = self._coef_layer(Theta_t[bi])
+                    loss = nn.MSELoss()(pred, tgt_t[bi])
+                    self._coef_optimizer.zero_grad()
+                    loss.backward()
+                    # Mask gradients: only update active coefficients
+                    with torch.no_grad():
+                        self._coef_layer.weight.grad *= self._active_mask_t
+                    self._coef_optimizer.step()
+                self._coef_layer.eval()
+
+            # Update SINDy coefs from the trained layer (for logging/diagnostics)
+            with torch.no_grad():
+                self._sindy_coefs = self._coef_layer.weight.cpu().numpy()
+                pred_all = self._coef_layer(Theta_t[:1000])
+                self._fit_errors = np.mean((pred_all.cpu().numpy() - targets[:1000]) ** 2, axis=0)
+
+            # Warm-start NAU on SGD-updated predictions (smooth target)
             best_val = float('inf'); best_epoch = 0
             best_state = self._nau_head.state_dict().copy()
-            for epoch in range(n_epochs):
+            for epoch in range(min(n_epochs, 30)):
                 self._nau_head.train()
                 perm_t = np.random.permutation(train_idx)
                 for i in range(0, len(perm_t), batch_size):
                     bi = perm_t[i:i+batch_size]
                     pred = self._nau_head(Theta_t[bi])
-                    # Stronger regularization → controls L_eff growth
-                    loss = nn.MSELoss()(pred, tgt_t[bi]) + 0.05 * self._nau_head.regularization_loss()
+                    loss = nn.MSELoss()(pred, tgt_t[bi]) + 0.01 * self._nau_head.regularization_loss()
                     self._nau_optimizer.zero_grad(); loss.backward(); self._nau_optimizer.step()
                 self._nau_head.eval()
-                # Clamp L_eff after each epoch
-                self._nau_head.clamp_lipschitz(max_L=200.0)
                 with torch.no_grad():
                     vl = float(nn.MSELoss()(self._nau_head(Theta_t[val_idx]), tgt_t[val_idx]))
                     if vl < best_val: best_val = vl; best_epoch = epoch; best_state = self._nau_head.state_dict().copy()
-                if epoch - best_epoch >= patience: break
+                if epoch - best_epoch >= 10: break
             self._nau_head.load_state_dict(best_state)
-            self._nau_head.clamp_lipschitz(max_L=200.0)  # final clamp
             self._trained = True
             return
 
@@ -361,10 +384,9 @@ class SINDyNAUAdapter:
                 pred = self._nau_head(Theta_t[bi])
                 mse_loss = nn.MSELoss()(pred, tgt_t[bi])
                 reg_loss = self._nau_head.regularization_loss()
-                loss = mse_loss + 0.05 * reg_loss  # stronger L_eff regularization
+                loss = mse_loss + 0.01 * reg_loss
                 self._nau_optimizer.zero_grad(); loss.backward(); self._nau_optimizer.step()
             self._nau_head.eval()
-            self._nau_head.clamp_lipschitz(max_L=200.0)
 
             with torch.no_grad():
                 val_pred = self._nau_head(Theta_t[val_idx])
@@ -393,7 +415,24 @@ class SINDyNAUAdapter:
         self._log(f"  NAU val MSE:        {nau_mse:.5f}")
         self._log(f"  NAU improvement:    {(1-nau_mse/sindy_mse)*100:.1f}%")
         self._log(f"  OOD bound L_eff:    {self._nau_head.L_eff:.4f}")
-        self._loop_done = True  # subsequent fit() calls skip the loop
+
+        # Initialize SGD coefficient layer from STLSQ solution
+        # Sparsity pattern (which features are active) is LOCKED here
+        n_out = self._sindy_coefs.shape[0]
+        n_feat = self._sindy_coefs.shape[1]
+        self._coef_layer = nn.Linear(n_feat, n_out, bias=False).to(self.device)
+        with torch.no_grad():
+            self._coef_layer.weight.copy_(torch.FloatTensor(self._sindy_coefs))
+        self._coef_optimizer = optim.Adam(self._coef_layer.parameters(), lr=1e-3, weight_decay=1e-4)
+        # Build active mask: only features that STLSQ kept as non-zero
+        mask = np.zeros_like(self._sindy_coefs)
+        for dim, m in enumerate(self._active_features):
+            mask[dim] = m.astype(float)
+        self._active_mask_t = torch.FloatTensor(mask).to(self.device)
+        n_active_total = int(mask.sum())
+        self._log(f"  SGD coef layer initialized: {n_active_total} active coefficients (locked sparsity)")
+
+        self._loop_done = True
 
     def _build_full_theta(self, SA):
         """Build full feature matrix including expanded columns."""
