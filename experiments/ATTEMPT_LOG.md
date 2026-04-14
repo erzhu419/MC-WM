@@ -312,3 +312,27 @@ L_eff=296 was NOT the bottleneck. The model needs that level of nonlinearity.
 **Conclusion: c7 no-loop, no-reg, poly2 only = 5147 remains the BEST.**
 The gap to c4 (6792) comes from δ architecture limitations (SINDy+NAU ~20k params
 vs c4's full model ~120k params), not from L_eff instability.
+
+---
+
+## c7 SGD refit (loop + orthogonal expand + SGD warm-start) → **5179** ✓
+
+**First time hypothesis loop matches no-loop performance!**
+
+SGD refit fixes the STLSQ coefficient jump problem:
+- Sparsity pattern locked after initial loop (316 features, sin(x1), cos(3x1), cross terms)
+- Online refit: SGD on nn.Linear with masked gradients (only active coefficients update)
+- Coefficients change smoothly → NAU warm-start stable → performance maintained
+
+| step | STLSQ no-loop | SGD with loop |
+|------|---------------|---------------|
+| 30k | 4971 | 5014 |
+| 35k | 4895 | **5754** |
+| 45k | 4647 | 5517 |
+| last 3 | 5147 | **5179** |
+
+L_eff: 565 (higher than no-loop 296, but SGD prevents catastrophic drift).
+m_s stable at 0.70 (similar to no-loop).
+
+**The hypothesis loop works when paired with SGD refit.**
+Next: tune SGD lr/schedule, or try on more environments.
