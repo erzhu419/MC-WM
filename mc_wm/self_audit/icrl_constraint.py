@@ -191,23 +191,14 @@ class ResidualAwareICRL:
             # Nominal should have LOW φ (constrained regions)
             nominal_loss = (is_weights.detach() * torch.log(phi_nominal.squeeze() + eps)).mean()
 
-            # Regularization: prevent collapse
-            # L2 on φ values (keep them near 0.5, not all 0 or all 1)
+            # Regularization: push expert toward 1.0, nominal toward 0.0
+            # (not 0.5 — that was making both sides collapse to ~0.4)
             reg_loss = self.reg_coeff * (
-                (phi_expert - 0.5).pow(2).mean() +
-                (phi_nominal - 0.5).pow(2).mean()
+                (phi_expert - 1.0).pow(2).mean() +  # expert should be feasible
+                phi_nominal.pow(2).mean()             # nominal should be constrained
             )
 
-            # Sparsity: encourage φ to be binary (0 or 1, not uniform)
-            # Entropy regularization: H(φ) = -φ log φ - (1-φ) log(1-φ)
-            # Minimize entropy → sharper boundaries
-            entropy_expert = -(phi_expert * torch.log(phi_expert + eps) +
-                               (1 - phi_expert) * torch.log(1 - phi_expert + eps)).mean()
-            entropy_nominal = -(phi_nominal * torch.log(phi_nominal + eps) +
-                                (1 - phi_nominal) * torch.log(1 - phi_nominal + eps)).mean()
-            entropy_reg = -0.01 * (entropy_expert + entropy_nominal)  # minimize entropy
-
-            loss = expert_loss + nominal_loss + reg_loss + entropy_reg
+            loss = expert_loss + nominal_loss + reg_loss
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -266,11 +257,28 @@ class ResidualAwareICRL:
 
     def get_constraint_weight(self, obs, acs, model_confidence=None):
         """
-        Combined with QΔ: returns weight in [0, 1].
-        High φ = feasible → weight ≈ 1
-        Low φ = constrained → weight ≈ 0
+        Temperature-calibrated weight in [0, 1].
+
+        Raw φ may not span [0,1] well (e.g., expert φ=0.4, nominal φ=0.2).
+        Calibrate: center on expert mean, scale by expert std, sigmoid.
+        Result: expert ≈ 0.8, nominal ≈ 0.3.
         """
-        return self.get_feasibility(obs, acs, model_confidence)
+        phi = self.get_feasibility(obs, acs, model_confidence)
+
+        # Calibrate using expert statistics
+        if self._expert_obs is not None and len(self._train_history) > 0:
+            phi_expert_mean = self._train_history[-1].get("phi_expert", 0.5)
+            # Temperature: spread the distribution around expert mean
+            # z = (φ - threshold) / τ, where threshold = midpoint between expert and nominal
+            phi_nominal_mean = self._train_history[-1].get("phi_nominal", 0.3)
+            threshold = (phi_expert_mean + phi_nominal_mean) / 2
+            tau = max(phi_expert_mean - phi_nominal_mean, 0.05)  # separation as scale
+            z = (phi - threshold) / tau
+            # Sigmoid maps to [0,1]: expert side → ~0.7-0.9, nominal side → ~0.1-0.3
+            calibrated = 1.0 / (1.0 + np.exp(-z))
+            return calibrated
+
+        return phi
 
     def get_stats(self):
         if not self._train_history:
