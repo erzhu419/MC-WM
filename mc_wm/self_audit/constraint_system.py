@@ -106,11 +106,13 @@ class ConstraintSystem:
                 check_fn=lambda s, a, sc, r, d=vel_dim: abs(sc[d]) > 40.0,
             ))
 
-        # ── Correction magnitude constraints
+        # ── State transition magnitude (not correction — sc is next_state, not corrected_current)
+        # Real env stats: joint vels can be ±25, so per-step change can be large
+        # Only flag truly extreme transitions
         self.constraints.append(Constraint(
-            name="correction_magnitude",
-            description="State correction |Δs| < 5 per dim (correction shouldn't be huge)",
-            check_fn=lambda s, a, sc, r: np.max(np.abs(sc - s)) > 5.0
+            name="extreme_transition",
+            description="Per-dim state change |s'−s| < 30 (filters catastrophic predictions)",
+            check_fn=lambda s, a, sc, r: np.max(np.abs(sc - s)) > 30.0
                 if len(s) == len(sc) else False,
         ))
 
