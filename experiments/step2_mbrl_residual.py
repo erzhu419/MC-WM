@@ -26,6 +26,7 @@ from mc_wm.policy.resac_agent import RESACAgent
 from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, CorrectedWorldModel
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
 from mc_wm.self_audit.constraint_system import ConstraintSystem
+from mc_wm.self_audit.icrl_constraint import ResidualAwareICRL
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
@@ -144,7 +145,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"])
+    parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10"])
     args = parser.parse_args()
     mode = args.mode
 
@@ -507,7 +508,7 @@ def main():
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
 
-    elif mode in ("c7", "c8", "c9"):
+    elif mode in ("c7", "c8", "c9", "c10"):
         # ── c6 but with SINDy+NAU instead of MLP δ
         # Tests: interpretable symbolic residual vs black-box MLP
         np.random.seed(SEED); torch.manual_seed(SEED)
@@ -566,8 +567,21 @@ def main():
         for i in range(len(s_real)):
             env_buf.add(s_real[i], a_real[i], r_real[i], s2_real[i], d_real[i])
 
-        # Constraint system (c9: Role #1 initial + Role #3 runtime audit)
+        # Constraint systems
         constraint_sys = ConstraintSystem(env_type="gravity_cheetah", log_fn=log) if mode == "c9" else None
+
+        # ICRL learned constraint (c10)
+        icrl = None
+        if mode == "c10":
+            log(f"\n[ICRL] Initializing Residual-Aware ICRL constraint learner...")
+            # Compute model confidence on real data (QΔ-style: prediction error)
+            ns_real_pred, _ = corrected.predict(s_real[:len(s_real)], a_real[:len(a_real)], deterministic=True)
+            model_conf = 1.0 / (1.0 + np.mean((ns_real_pred - s2_real) ** 2, axis=1))
+            icrl = ResidualAwareICRL(
+                obs_dim, act_dim, hidden_sizes=(128, 128),
+                lr=3e-4, reg_coeff=0.1, use_model_confidence=True,
+                target_kl=10.0, device=DEVICE, log_fn=log)
+            icrl.set_expert_data(s_real, a_real, model_confidence=model_conf)
 
         obs, _ = env_real.reset(seed=SEED); curve = []
         log(f"\n[Phase 2: {mode} MBPO with SINDy+NAU δ] {TRAIN_STEPS//1000}k steps")
@@ -603,30 +617,36 @@ def main():
                     ns_pred, r_pred = corrected.predict(
                         start_states, actions, deterministic=False)
 
-                    if mode == "c9":
+                    if mode in ("c9", "c10"):
                         # QΔ: per-transition model confidence weight
                         ns_real = env_buf.s2[s_idx]
                         per_s_err = np.mean((ns_pred - ns_real) ** 2, axis=1)
                         tau_s = float(np.median(per_s_err)) + 1e-8
-                        w = 1.0 / (1.0 + per_s_err / tau_s)
-                        r_weighted = r_pred * w
+                        w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
 
-                        # Constraint filter: reject physically impossible corrections
-                        if constraint_sys is not None:
-                            ok_mask, viol_counts = constraint_sys.check_batch(
-                                start_states, actions, ns_pred, r_weighted)
-                            # Only add transitions that pass all constraints
-                            valid = np.where(ok_mask)[0]
-                            if len(valid) > 0:
-                                model_buf.add_batch(
-                                    start_states[valid], actions[valid],
-                                    r_weighted[valid].reshape(-1, 1), ns_pred[valid],
-                                    np.zeros((len(valid), 1), np.float32))
+                        if mode == "c10" and icrl is not None:
+                            # ICRL: learned feasibility weight
+                            model_conf = w_qdelta.reshape(-1)  # use QΔ as confidence input
+                            w_icrl = icrl.get_constraint_weight(
+                                start_states, actions, model_confidence=model_conf)
+                            # Combined: QΔ × φ(s,a)
+                            w = w_qdelta * w_icrl
+                        elif mode == "c9" and constraint_sys is not None:
+                            # Hardcoded constraint filter
+                            ok_mask, _ = constraint_sys.check_batch(
+                                start_states, actions, ns_pred, r_pred * w_qdelta)
+                            w = w_qdelta * ok_mask.astype(np.float32)
                         else:
+                            w = w_qdelta
+
+                        r_weighted = r_pred * w
+                        # Filter zero-weight transitions
+                        valid = np.where(w > 0.01)[0]
+                        if len(valid) > 0:
                             model_buf.add_batch(
-                                start_states, actions,
-                                r_weighted.reshape(-1, 1), ns_pred,
-                                np.zeros((ROLLOUT_BATCH, 1), np.float32))
+                                start_states[valid], actions[valid],
+                                r_weighted[valid].reshape(-1, 1), ns_pred[valid],
+                                np.zeros((len(valid), 1), np.float32))
                     else:
                         model_buf.add_batch(
                             start_states, actions,
@@ -652,8 +672,24 @@ def main():
                     if constraint_sys is not None:
                         cs = constraint_sys.get_stats()
                         diag += f" C={cs['n_constraints']} rej={cs['reject_rate']:.1%}"
+                    if icrl is not None:
+                        ics = icrl.get_stats()
+                        diag += f" φ_e={ics.get('phi_expert',0):.2f} φ_n={ics.get('phi_nominal',0):.2f}"
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
+
+                # ICRL backward step: update φ(s,a)
+                if icrl is not None and step % EVAL_INTERVAL == 0 and model_buf.size > 100:
+                    nom_idx = np.random.randint(0, model_buf.size, min(2000, model_buf.size))
+                    nom_conf = 1.0 / (1.0 + np.mean(
+                        (corrected.predict(model_buf.s[nom_idx], model_buf.a[nom_idx], True)[0]
+                         - model_buf.s2[nom_idx]) ** 2, axis=1))
+                    icrl_metrics = icrl.train_constraint(
+                        model_buf.s[nom_idx], model_buf.a[nom_idx],
+                        nominal_conf=nom_conf, n_iters=10)
+                    log(f"    ICRL update: φ_e={icrl_metrics['phi_expert']:.3f} "
+                        f"φ_n={icrl_metrics['phi_nominal']:.3f} "
+                        f"sep={icrl_metrics['separation']:.3f} kl={icrl_metrics['kl']:.3f}")
 
                 # Role #3: periodic constraint audit
                 if constraint_sys is not None and step % (EVAL_INTERVAL * 2) == 0:
