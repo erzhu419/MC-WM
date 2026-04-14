@@ -29,3 +29,7 @@ texput.log
 final decision
 ResWorld/
 experiments/diag_data/
+
+Constraint-Inference-in-Safe-IRL/
+icrl/
+simple-icrl/
