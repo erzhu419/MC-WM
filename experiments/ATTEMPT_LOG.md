@@ -336,3 +336,28 @@ m_s stable at 0.70 (similar to no-loop).
 
 **The hypothesis loop works when paired with SGD refit.**
 Next: tune SGD lr/schedule, or try on more environments.
+
+---
+
+## c9: QΔ weighted model rollouts → **5264** ✓ NEW BEST
+
+QΔ as per-step model confidence weight (γ=0):
+  error(s,a) = ||M_real_pred - real_next||²
+  w = 1/(1+error/τ), τ = median(error)
+  model_buf stores r_weighted = r_pred * w
+
+| Config | Return | L_eff |
+|--------|--------|-------|
+| c7 SGD refit | 4801 | 770 |
+| **c9 QΔ weighted** | **5264** | **303** |
+| c4 Direct | 6792 | — |
+
+QΔ weighting improves both performance (+9.6%) and stability (L_eff 770→303).
+Unreliable model rollouts get down-weighted rewards → policy doesn't chase model errors.
+
+**Updated best scoreboard:**
+| Method | Return | vs Baseline |
+|--------|--------|-------------|
+| c1 Raw Sim | 875 | baseline |
+| **c9 SINDy+NAU+loop+SGD+QΔ** | **5264** | **+502%** |
+| c4 Direct M_real | 6792 | +676% |
