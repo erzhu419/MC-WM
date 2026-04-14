@@ -382,3 +382,22 @@ Slight performance cost from reduced model data quantity.
 
 **Final complete system (all v4 components):**
 SINDy + hypothesis loop + NAU/NMU + SGD refit + QΔ weight + constraints = 5015 (+473%)
+
+---
+
+## c10: Residual-Aware ICRL → **3606**
+
+ICRL learned to distinguish expert (φ=0.36) from nominal (φ=0.21).
+Separation grew from 0.005 to 0.15 over training — correct direction.
+
+But φ_expert=0.36 is too low → combined weight QΔ×φ ≈ 0.3 suppresses 
+ALL model rollouts too aggressively. Need φ calibration so expert φ→0.8+.
+
+| Config | Return | Constraint type |
+|--------|--------|----------------|
+| c9 QΔ only | 5264 | no constraint |
+| c9 + hardcoded | 5015 | 20 physics rules |
+| c10 ICRL | 3606 | learned φ (too aggressive) |
+
+ICRL mechanism works (separation >0) but needs calibration.
+Next: normalize φ so expert ≈ 0.8, or use φ for ranking only.
