@@ -361,3 +361,24 @@ Unreliable model rollouts get down-weighted rewards → policy doesn't chase mod
 | c1 Raw Sim | 875 | baseline |
 | **c9 SINDy+NAU+loop+SGD+QΔ** | **5264** | **+502%** |
 | c4 Direct M_real | 6792 | +676% |
+
+---
+
+## c9 with constraints → **5015**
+
+QΔ weighted + constraint system (Role #1 + Role #3):
+- Role #1: 20 initial physics constraints
+- Role #3: auto-audit added 24 more → 44 total (monotonic growth ✓)
+- Reject rate: 25% → 42% (constraints tighten over training)
+- model_buf: 272 → 137 (fewer but safer model rollouts)
+
+| Config | Return | Components |
+|--------|--------|-----------|
+| c9 no constraints | 5264 | QΔ weight only |
+| c9 with constraints | 5015 | QΔ + constraints (-4.7%) |
+
+Constraints work correctly (monotonic growth, reject physically impossible).
+Slight performance cost from reduced model data quantity.
+
+**Final complete system (all v4 components):**
+SINDy + hypothesis loop + NAU/NMU + SGD refit + QΔ weight + constraints = 5015 (+473%)
