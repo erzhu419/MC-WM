@@ -401,3 +401,24 @@ ALL model rollouts too aggressively. Need φ calibration so expert φ→0.8+.
 
 ICRL mechanism works (separation >0) but needs calibration.
 Next: normalize φ so expert ≈ 0.8, or use φ for ranking only.
+
+---
+
+## c10 ICRL v2 (calibrated) → **4242** (up from 3606)
+
+Fixed: expert reg→1.0 + temperature-calibrated weight output.
+φ_expert=0.43, φ_nominal=0.17, separation=0.26 (up from 0.15).
+model_buf=400 (not over-filtered).
+
+Still below c9 QΔ-only (5264). ICRL φ adds safety but costs performance.
+For GravityCheetah (simple env), learned constraints may be overkill —
+constraints are most valuable when safety matters (robotics, real deployment).
+
+**All results summary:**
+| Config | Return | Key components |
+|--------|--------|---------------|
+| c1 baseline | 875 | Raw Sim |
+| c9 QΔ only | **5264** | best performance |
+| c9+hardcoded | 5015 | + physics constraints |
+| c10 ICRL | 4242 | + learned constraints |
+| c4 upper bound | 6792 | direct M_real |
