@@ -25,6 +25,7 @@ from mc_wm.envs.hp_mujoco.gravity_cheetah import GravityCheetahEnv
 from mc_wm.policy.resac_agent import RESACAgent
 from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, CorrectedWorldModel
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
+from mc_wm.self_audit.constraint_system import ConstraintSystem
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
@@ -565,8 +566,11 @@ def main():
         for i in range(len(s_real)):
             env_buf.add(s_real[i], a_real[i], r_real[i], s2_real[i], d_real[i])
 
+        # Constraint system (c9: Role #1 initial + Role #3 runtime audit)
+        constraint_sys = ConstraintSystem(env_type="gravity_cheetah", log_fn=log) if mode == "c9" else None
+
         obs, _ = env_real.reset(seed=SEED); curve = []
-        log(f"\n[Phase 2: c7 MBPO with SINDy+NAU δ] {TRAIN_STEPS//1000}k steps")
+        log(f"\n[Phase 2: {mode} MBPO with SINDy+NAU δ] {TRAIN_STEPS//1000}k steps")
 
         for step in range(1, TRAIN_STEPS+1):
             a_act = env_real.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
@@ -600,23 +604,29 @@ def main():
                         start_states, actions, deterministic=False)
 
                     if mode == "c9":
-                        # QΔ: compute per-transition model confidence
-                        # Compare M_real prediction with actual real next-state
-                        # for the SAME (s,a) pair from env_buf
-                        ns_real = env_buf.s2[s_idx]  # ground truth
-                        r_real_gt = env_buf.r[s_idx].squeeze()
-                        per_s_err = np.mean((ns_pred - ns_real) ** 2, axis=1)  # (B,)
-                        per_r_err = (r_pred - r_real_gt) ** 2
-                        # Weight: high error → low weight
-                        # w = 1/(1 + error/τ), τ calibrated to median error
+                        # QΔ: per-transition model confidence weight
+                        ns_real = env_buf.s2[s_idx]
+                        per_s_err = np.mean((ns_pred - ns_real) ** 2, axis=1)
                         tau_s = float(np.median(per_s_err)) + 1e-8
                         w = 1.0 / (1.0 + per_s_err / tau_s)
-                        # Scale reward by weight (model-confident transitions get full reward)
                         r_weighted = r_pred * w
-                        model_buf.add_batch(
-                            start_states, actions,
-                            r_weighted.reshape(-1, 1), ns_pred,
-                            np.zeros((ROLLOUT_BATCH, 1), np.float32))
+
+                        # Constraint filter: reject physically impossible corrections
+                        if constraint_sys is not None:
+                            ok_mask, viol_counts = constraint_sys.check_batch(
+                                start_states, actions, ns_pred, r_weighted)
+                            # Only add transitions that pass all constraints
+                            valid = np.where(ok_mask)[0]
+                            if len(valid) > 0:
+                                model_buf.add_batch(
+                                    start_states[valid], actions[valid],
+                                    r_weighted[valid].reshape(-1, 1), ns_pred[valid],
+                                    np.zeros((len(valid), 1), np.float32))
+                        else:
+                            model_buf.add_batch(
+                                start_states, actions,
+                                r_weighted.reshape(-1, 1), ns_pred,
+                                np.zeros((ROLLOUT_BATCH, 1), np.float32))
                     else:
                         model_buf.add_batch(
                             start_states, actions,
@@ -639,8 +649,22 @@ def main():
                     r_err = np.sqrt(np.mean((r_test - env_buf.r[idx].squeeze()) ** 2))
                     ood = residual.get_ood_bound(env_buf.s[idx], env_buf.a[idx]).mean()
                     diag = f"  m_s={s_err:.3f} m_r={r_err:.3f} L={residual._nau_head.L_eff:.3f}"
+                    if constraint_sys is not None:
+                        cs = constraint_sys.get_stats()
+                        diag += f" C={cs['n_constraints']} rej={cs['reject_rate']:.1%}"
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
+
+                # Role #3: periodic constraint audit
+                if constraint_sys is not None and step % (EVAL_INTERVAL * 2) == 0:
+                    idx_audit = np.random.randint(0, env_buf.size, min(1000, env_buf.size))
+                    ns_audit, r_audit = corrected.predict(
+                        env_buf.s[idx_audit], env_buf.a[idx_audit], deterministic=True)
+                    corr_mag = np.sqrt(np.mean((ns_audit - env_buf.s2[idx_audit]) ** 2, axis=1))
+                    constraint_sys.audit_suspicious(
+                        env_buf.s[idx_audit], env_buf.a[idx_audit],
+                        ns_audit, r_audit, corr_mag, step=step)
+
         env_real.close()
 
     elif mode == "c5":
