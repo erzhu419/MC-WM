@@ -50,9 +50,14 @@ class SINDyNAUAdapter:
     def __init__(self, obs_dim, act_dim, sindy_threshold=0.05, sindy_alpha=0.05,
                  nau_hidden=32, lr=1e-3, device="cpu",
                  max_rounds=3, eps_threshold=0.05, diagnosis_alpha=0.05,
-                 log_fn=None, env_type=None):
+                 log_fn=None, env_type=None, claude_oracle=None,
+                 env_description_for_llm: str | None = None):
         self._log = log_fn or (lambda msg: print(msg))
         self._env_type = env_type  # if set, use LLM oracle instead of auto-expand
+        # Role #2: Claude oracle for feature hypotheses in the self-hypothesis loop.
+        # When set, augments orthogonal expansion with LLM-suggested physics features.
+        self._claude_oracle = claude_oracle
+        self._env_desc_llm = env_description_for_llm or ""
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.input_dim = obs_dim + act_dim
@@ -101,6 +106,177 @@ class SINDyNAUAdapter:
         self._fit_errors = None
         self._hypothesis_logs = []
         self._loop_done = False
+        # LLM (Role #2) tracking counters — all zero unless self._claude_oracle set.
+        self._llm_feat_proposed = 0
+        self._llm_feat_accepted = 0
+        self._llm_feat_rejected_unsafe = 0
+        self._llm_feat_rejected_eval = 0
+        self._llm_feat_rejected_shape = 0
+        self._llm_feat_rejected_nonfinite = 0
+        self._llm_rounds = 0
+        # Decision history: each accepted/rejected LLM feature with final coef
+        # outcome.  Fed back to future Role #2 calls so LLM sees how its past
+        # proposals actually performed.
+        self._llm_feat_history: list[dict] = []
+
+    def _eval_llm_features(self, SA, llm_feats):
+        """
+        Safely evaluate LLM-proposed expressions against the (s, a) stack.
+
+        SA has shape (N, obs_dim + act_dim).  `llm_feats` is a list of dicts
+        `{"expr": "np.sin(3*s[1])", "name": "sin_3theta", "why": "..."}`.
+
+        Each expression is evaluated per-row with `s` = SA[i, :obs_dim],
+        `a` = SA[i, obs_dim:].  We restrict globals to {"np": np} and forbid
+        attribute access beyond numpy module.  Malformed / unsafe exprs
+        silently drop the feature.
+        """
+        import numpy as np
+        cols, names = [], []
+        safe_globals = {"__builtins__": {}, "np": np}
+        n = SA.shape[0]
+        self._llm_rounds += 1
+        for feat in llm_feats[:8]:
+            self._llm_feat_proposed += 1
+            expr = feat.get("expr", "")
+            name = feat.get("name", expr[:20])
+            if not expr or any(bad in expr for bad in ("__", "import", "open(", "os.", "sys.", "eval(", "exec(")):
+                self._llm_feat_rejected_unsafe += 1
+                self._log(f"    ✗ LLM expr rejected (unsafe): {expr[:50]}")
+                continue
+            try:
+                s_arr = SA[:, :self.obs_dim]
+                a_arr = SA[:, self.obs_dim:]
+                col = eval(expr, safe_globals, {"s": s_arr.T, "a": a_arr.T})
+                col = np.asarray(col, dtype=np.float64)
+                if col.shape != (n,):
+                    self._llm_feat_rejected_shape += 1
+                    self._log(f"    ✗ LLM expr shape mismatch: {name} got {col.shape}")
+                    continue
+                if not np.all(np.isfinite(col)):
+                    self._llm_feat_rejected_nonfinite += 1
+                    self._log(f"    ✗ LLM expr produces non-finite: {name}")
+                    continue
+                std = col.std() + 1e-8
+                cols.append(col / std)
+                names.append(f"llm_{name}")
+                self._llm_feat_accepted += 1
+                self._llm_feat_history.append({
+                    "round": self._llm_rounds,
+                    "name": f"llm_{name}",
+                    "expr": expr,
+                    "why": feat.get("why", "")[:80],
+                    "outcome": None,  # filled later when coefs finalize or prune runs
+                })
+                self._log(f"      + {name}: {expr[:40]} (std={std:.3f})")
+            except Exception as e:
+                self._llm_feat_rejected_eval += 1
+                self._log(f"    ✗ LLM expr eval failed: {name}  ({str(e)[:60]})")
+                continue
+        if not cols:
+            return None, []
+        return np.column_stack(cols), names
+
+    def _update_llm_history_outcomes(self, feature_names: list, coefs: np.ndarray,
+                                       threshold: float = 0.02) -> None:
+        """Fill `outcome` field for LLM features based on final SINDy coefs."""
+        if not self._llm_feat_history:
+            return
+        # Build name → (max_abs_coef, n_dims_active)
+        name_to_stat = {}
+        for i, n in enumerate(feature_names):
+            if isinstance(n, str) and n.startswith("llm_"):
+                col = coefs[:, i] if coefs.ndim == 2 else np.array([coefs[i]])
+                name_to_stat[n] = {
+                    "max_abs_coef": float(np.abs(col).max()),
+                    "n_dims_active": int((np.abs(col) > threshold).sum()),
+                }
+        for entry in self._llm_feat_history:
+            if entry["outcome"] is None and entry["name"] in name_to_stat:
+                entry["outcome"] = name_to_stat[entry["name"]]
+
+    def prune_llm_features(self, feature_names: list, coefs: np.ndarray,
+                           threshold: float = 0.02) -> list:
+        """
+        Role #4: review LLM-added feature contributions via SINDy coefs and
+        recommend names to drop.
+
+        feature_names: full feature name list (same order as coefs columns)
+        coefs: (n_dims, n_features) SINDy coefficient matrix after fit
+        threshold: |coef| below this counts as "inactive" for that dim
+
+        Returns: list of LLM feature names to drop (pass to caller to rebuild
+        the feature matrix without them).
+        """
+        if self._claude_oracle is None:
+            return []
+        llm_indices = [i for i, n in enumerate(feature_names)
+                       if isinstance(n, str) and n.startswith("llm_")]
+        if not llm_indices:
+            return []
+        stats = []
+        for i in llm_indices:
+            col = coefs[:, i] if coefs.ndim == 2 else np.array([coefs[i]])
+            max_abs = float(np.abs(col).max())
+            n_active = int((np.abs(col) > threshold).sum())
+            stats.append({
+                "name": feature_names[i],
+                "expr": feature_names[i][4:],  # strip "llm_" prefix for display
+                "max_abs_coef": round(max_abs, 5),
+                "n_dims_active": n_active,
+                "val_mse_delta": 0.0,  # placeholder; not measured per-feature
+            })
+        to_drop = self._claude_oracle.role4_prune_features(
+            self._env_desc_llm, stats)
+        if to_drop:
+            self._log(f"  [LLM Role #4] drops {len(to_drop)} LLM features: {to_drop[:4]}")
+        else:
+            self._log(f"  [LLM Role #4] reviewed {len(stats)} LLM features, kept all")
+        self._llm_role4_dropped_features = getattr(
+            self, "_llm_role4_dropped_features", 0) + len(to_drop)
+        return to_drop
+
+    def get_llm_summary(self) -> dict:
+        """Return LLM Role #2 activity summary for end-of-training reporting."""
+        oracle_stats = {}
+        if self._claude_oracle is not None and hasattr(self._claude_oracle, "stats"):
+            oracle_stats = self._claude_oracle.stats()
+        return {
+            "rounds": self._llm_rounds,
+            "proposed": self._llm_feat_proposed,
+            "accepted": self._llm_feat_accepted,
+            "rejected_unsafe": self._llm_feat_rejected_unsafe,
+            "rejected_eval": self._llm_feat_rejected_eval,
+            "rejected_shape": self._llm_feat_rejected_shape,
+            "rejected_nonfinite": self._llm_feat_rejected_nonfinite,
+            "role4_dropped_features": getattr(self, "_llm_role4_dropped_features", 0),
+            "oracle_calls": oracle_stats.get("calls", 0),
+            "oracle_cache_hits": oracle_stats.get("cache_hits", 0),
+            "oracle_errors": oracle_stats.get("errors", 0),
+        }
+
+    def log_llm_summary(self):
+        """Pretty-print the LLM summary via self._log.  Called at end of training."""
+        if self._claude_oracle is None:
+            return
+        s = self.get_llm_summary()
+        self._log("")
+        self._log("┌─ [LLM Role #2 Summary] ─────────────────")
+        self._log(f"│ rounds invoked      : {s['rounds']}")
+        self._log(f"│ features proposed   : {s['proposed']}")
+        self._log(f"│ features accepted   : {s['accepted']}")
+        self._log(f"│ rejected (unsafe)   : {s['rejected_unsafe']}")
+        self._log(f"│ rejected (eval err) : {s['rejected_eval']}")
+        self._log(f"│ rejected (shape)    : {s['rejected_shape']}")
+        self._log(f"│ rejected (non-fin)  : {s['rejected_nonfinite']}")
+        self._log(f"│ Role#4 pruned       : {s['role4_dropped_features']}")
+        self._log(f"│ Claude CLI calls    : {s['oracle_calls']}")
+        self._log(f"│ Claude cache hits   : {s['oracle_cache_hits']}")
+        self._log(f"│ Claude errors       : {s['oracle_errors']}")
+        if s['proposed'] > 0:
+            accept_rate = 100.0 * s['accepted'] / s['proposed']
+            self._log(f"│ acceptance rate     : {accept_rate:.1f}%")
+        self._log("└──────────────────────────────────────────")
 
     def _sindy_fit_one_round(self, Theta, targets):
         """Fit SINDy coefficients (Ridge + STLSQ) on feature matrix Theta."""
@@ -319,6 +495,46 @@ class SINDyNAUAdapter:
             new_extra, new_names, orth_diag = orth_expander.expand(
                 SA, Theta_full, remainder_s, log_fn=self._log)
 
+            # Role #2: ask Claude for physics-informed features (optional).
+            # Augments orthogonal expansion; LLM's suggestions are evaluated
+            # as safe numpy expressions over s[·], a[·] with access to np.
+            if self._claude_oracle is not None:
+                # Collect previously-accepted LLM features (across earlier rounds).
+                prev_accepted_llm = [n for n in extra_names
+                                     if isinstance(n, str) and n.startswith("llm_")]
+                # Per-dim residual std for LLM prioritisation.
+                try:
+                    resid_std = list(np.std(remainder_s, axis=0))
+                except Exception:
+                    resid_std = None
+                # Current val MSE estimate (approximate — use in-sample mse as proxy).
+                cur_val_mse = float(np.mean(remainder_s ** 2))
+                nau_L = float(self._nau_head.L_eff) if self._nau_head is not None else None
+                self._log(f"    [LLM Role #2] ctx: round={round_num}, "
+                          f"prev_accepted={len(prev_accepted_llm)}, "
+                          f"val_mse={cur_val_mse:.5f}, "
+                          f"L_eff={nau_L:.3f if nau_L is not None else -1}, "
+                          f"history={len(self._llm_feat_history)} entries")
+                llm_feats = self._claude_oracle.role2_feature_hypotheses(
+                    env_description=self._env_desc_llm,
+                    current_basis=extra_names if extra_names else [],
+                    diagnosis_summary="; ".join(diag_summary[:5]),
+                    obs_dim=self.obs_dim, act_dim=self.act_dim,
+                    round_num=round_num,
+                    prev_accepted=prev_accepted_llm,
+                    current_val_mse=cur_val_mse,
+                    nau_L_eff=nau_L,
+                    residual_per_dim_std=resid_std,
+                    feature_history=self._llm_feat_history[-10:],
+                )
+                if llm_feats:
+                    self._log(f"    + LLM Role#2: {len(llm_feats)} feature suggestions")
+                    llm_cols, llm_names = self._eval_llm_features(SA, llm_feats)
+                    if llm_cols is not None and llm_cols.shape[1] > 0:
+                        new_extra = (np.hstack([new_extra, llm_cols])
+                                     if new_extra.shape[1] > 0 else llm_cols)
+                        new_names = new_names + llm_names
+
             if len(new_names) > 0:
                 if extra_cols is not None:
                     extra_cols = np.hstack([extra_cols, new_extra])
@@ -431,6 +647,16 @@ class SINDyNAUAdapter:
         self._active_mask_t = torch.FloatTensor(mask).to(self.device)
         n_active_total = int(mask.sum())
         self._log(f"  SGD coef layer initialized: {n_active_total} active coefficients (locked sparsity)")
+
+        # Update LLM feature outcomes for Role #2 history feedback.
+        try:
+            final_names = list(self._library.get_feature_names_out()) if hasattr(
+                self._library, "get_feature_names_out") else []
+            if hasattr(self, "_expand_names") and self._expand_names:
+                final_names = final_names + list(self._expand_names)
+            self._update_llm_history_outcomes(final_names, coefs)
+        except Exception as e:
+            self._log(f"  (skip LLM history outcome update: {e})")
 
         self._loop_done = True
 

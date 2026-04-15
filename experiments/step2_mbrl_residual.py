@@ -26,9 +26,11 @@ from mc_wm.envs.hp_mujoco.carpet_ant import CarpetAntEnv
 from mc_wm.envs.hp_mujoco.ant_wall_broken import AntWallBrokenEnv
 from mc_wm.envs.hp_mujoco.friction_walker import FrictionWalkerSoftCeilingEnv
 from mc_wm.policy.resac_agent import RESACAgent
+from mc_wm.policy.qdelta_bellman import QDeltaBellman
 from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, CorrectedWorldModel
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
 from mc_wm.residual.kan_adapter import KANResidualAdapter
+from mc_wm.self_audit.claude_cli_oracle import ClaudeCLIOracle
 from mc_wm.self_audit.constraint_system import ConstraintSystem
 from mc_wm.self_audit.icrl_constraint import ResidualAwareICRL
 
@@ -172,6 +174,18 @@ def main():
                         help="Replace SINDy+NAU with KAN for residual δ")
     parser.add_argument("--use_kan_phi", action="store_true",
                         help="Replace MLP with KAN inside ICRL FeasibilityNet")
+    parser.add_argument("--qdelta_gamma", type=float, default=0.0,
+                        help="γ for Bellman QΔ critic. 0 = legacy per-step weight "
+                             "(1/(1+MSE/τ)); >0 = trained log-confidence Bellman "
+                             "critic (theoretical alignment with bellman_contraction).")
+    parser.add_argument("--use_claude_llm", action="store_true",
+                        help="Enable Claude CLI oracle (Role #2 feature hypotheses) "
+                             "during SINDy+NAU self-hypothesis loop. Requires `claude` "
+                             "CLI on PATH (subscription plan, no API key).")
+    parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
+                        help="Model id for Claude oracle. Haiku 4.5 is default "
+                             "(~10-20x cheaper than Sonnet; use --claude_model "
+                             "claude-sonnet-4-6 for harder reasoning tasks).")
     args = parser.parse_args()
     mode = args.mode
 
@@ -184,6 +198,8 @@ def main():
         _suffix += "_kanRes"
     if args.use_kan_phi:
         _suffix += "_kanPhi"
+    if args.qdelta_gamma > 0:
+        _suffix += f"_qdg{int(args.qdelta_gamma*100):02d}"
     log_path = f"/tmp/step2_{mode}_{args.env}{_suffix}.log"
     def log(msg=""):
         print(msg, flush=True)
@@ -575,6 +591,23 @@ def main():
 
         ns_sim_pred, r_sim_pred = wm_sim.predict(s_real, a_real, deterministic=True)
 
+        # Shared Claude oracle (used by SINDy+NAU Role #2 AND ConstraintSystem
+        # Role #1/#3).  None when --use_claude_llm not set.
+        _claude = None; _env_desc = ""
+        if args.use_claude_llm:
+            _claude = ClaudeCLIOracle(model=args.claude_model, log_fn=log)
+            if args.env.startswith("gravity"):
+                _env_desc = ("HalfCheetah-v4 with gravity 2x in sim, 1x in real. "
+                             "obs[0]=rootz, obs[1]=torso_angle, obs[2:8]=6 joint angles, "
+                             "obs[8]=vx, obs[9]=vz, obs[10]=va_torso, obs[11:17]=joint vels.")
+            elif args.env.startswith("friction"):
+                _env_desc = ("Walker2d-v4 with ground friction 0.3x in sim, 1x in real. "
+                             "obs[0]=rootz (~1.2), obs[1]=torso_angle, obs[2:8]=joint angles, "
+                             "obs[8:17]=velocities.")
+            elif args.env == "ant_wall_broken":
+                _env_desc = ("Ant-v4; real has action[4:]=0 (back legs broken) and wall x<-3.")
+            log(f"  [LLM] Claude oracle enabled: model={args.claude_model}")
+
         if args.use_kan_residual:
             log(f"  Training KAN residual δ (replaces SINDy+NAU)...")
             residual = KANResidualAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log)
@@ -583,7 +616,9 @@ def main():
             _env_type = "gravity_cheetah" if mode == "c8" else None
             _max_rounds = 3
             residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
-                                        env_type=_env_type, max_rounds=_max_rounds)
+                                        env_type=_env_type, max_rounds=_max_rounds,
+                                        claude_oracle=_claude,  # Role #2 hypotheses
+                                        env_description_for_llm=_env_desc)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20)
 
@@ -618,8 +653,26 @@ def main():
         for i in range(len(s_real)):
             env_buf.add(s_real[i], a_real[i], r_real[i], s2_real[i], d_real[i])
 
-        # Constraint systems
-        constraint_sys = ConstraintSystem(env_type="gravity_cheetah", log_fn=log) if mode == "c9" else None
+        # Constraint systems (Role #1 + Role #3 audit).  Reuse the same Claude
+        # oracle instance as SINDy+NAU so cache/stats are unified.
+        constraint_sys = None
+        if mode == "c9":
+            constraint_sys = ConstraintSystem(
+                env_type="gravity_cheetah", log_fn=log,
+                claude_oracle=_claude,  # None if --use_claude_llm not set
+                env_description_for_llm=_env_desc,
+            )
+
+        # γ > 0 Bellman QΔ (log-confidence critic, aligned with
+        # ResidualMDP.lean bellman_contraction).  γ = 0 reverts to legacy
+        # per-step weight `1/(1+MSE/τ)` (no Bellman accumulation).
+        qdelta_bellman = None
+        if args.qdelta_gamma > 0:
+            qdelta_bellman = QDeltaBellman(
+                obs_dim, act_dim, hidden=128,
+                gamma=args.qdelta_gamma, lr=3e-4, device=DEVICE)
+            log(f"\n[QΔ] Bellman critic enabled: γ={args.qdelta_gamma} "
+                f"(log-confidence Bellman, see qdelta_bellman.py)")
 
         # ICRL learned constraint (c10)
         # Two modes:
@@ -672,6 +725,31 @@ def main():
                 corrected = CorrectedWorldModel(wm_sim, residual)
                 model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
+                # TD update for Bellman QΔ critic on real transitions
+                if qdelta_bellman is not None:
+                    n_qd = min(env_buf.size, 4096)
+                    idx_qd = np.random.choice(env_buf.size, n_qd, replace=False) \
+                        if env_buf.size > n_qd else np.arange(env_buf.size)
+                    s_qd = env_buf.s[idx_qd]; a_qd = env_buf.a[idx_qd]
+                    s2_qd = env_buf.s2[idx_qd]; d_qd = env_buf.d[idx_qd].squeeze()
+                    # Compute MSE of corrected model on these real transitions
+                    ns_qd_pred, _ = corrected.predict(s_qd, a_qd, deterministic=True)
+                    mse_qd = np.mean((ns_qd_pred - s2_qd) ** 2, axis=1)
+                    # Policy next-action on s2 for bootstrap
+                    def _next_action(s2_tensor):
+                        s2_np = s2_tensor.cpu().numpy()
+                        a2 = np.array([agent.get_action(ss, deterministic=True) for ss in s2_np])
+                        return torch.as_tensor(a2, dtype=torch.float32, device=DEVICE)
+                    qd_metrics = qdelta_bellman.update(
+                        torch.as_tensor(s_qd, dtype=torch.float32, device=DEVICE),
+                        torch.as_tensor(a_qd, dtype=torch.float32, device=DEVICE),
+                        torch.as_tensor(s2_qd, dtype=torch.float32, device=DEVICE),
+                        torch.as_tensor(d_qd, dtype=torch.float32, device=DEVICE),
+                        torch.as_tensor(mse_qd, dtype=torch.float32, device=DEVICE),
+                        _next_action, n_iters=20)
+                    log(f"    QΔ update: td_loss={qd_metrics['td_loss']:.4f} "
+                        f"τ={qd_metrics['tau']:.3f} qd_mean={qd_metrics['qd_mean']:.3f}")
+
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
                 if step % ROLLOUT_FREQ == 0:
                     # Sample start states from env_buf (with their real next-states)
@@ -683,11 +761,15 @@ def main():
                         start_states, actions, deterministic=False)
 
                     if mode in ("c9", "c10"):
-                        # QΔ: per-transition model confidence weight
                         ns_real = env_buf.s2[s_idx]
                         per_s_err = np.mean((ns_pred - ns_real) ** 2, axis=1)
-                        tau_s = float(np.median(per_s_err)) + 1e-8
-                        w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
+                        if qdelta_bellman is not None:
+                            # Bellman QΔ critic: w = exp(QΔ(s,a)), γ>0 propagation
+                            w_qdelta = qdelta_bellman.weight_np(start_states, actions)
+                        else:
+                            # Legacy per-step weight (γ=0): 1/(1+MSE/τ)
+                            tau_s = float(np.median(per_s_err)) + 1e-8
+                            w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
 
                         if mode == "c10" and icrl is not None:
                             # Compute φ score per rollout (input depends on ICRL mode)
@@ -739,6 +821,15 @@ def main():
             if step % EVAL_INTERVAL == 0:
                 ret, std, viol = evaluate(agent, env_cls)
                 curve.append((step, ret, viol))
+                # Feed violation trend + training state to constraint_sys so
+                # LLM Role #3/#4 prompts include reward/buffer context and
+                # Role #4 can see whether violations are trending to zero.
+                if constraint_sys is not None:
+                    if hasattr(constraint_sys, "update_violation_trend"):
+                        constraint_sys.update_violation_trend(viol)
+                    if hasattr(constraint_sys, "update_training_metrics"):
+                        constraint_sys.update_training_metrics(
+                            reward=ret, buffer_size=env_buf.size)
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
@@ -754,6 +845,11 @@ def main():
                     if icrl is not None:
                         ics = icrl.get_stats()
                         diag += f" φ_e={ics.get('phi_expert',0):.2f} φ_n={ics.get('phi_nominal',0):.2f}"
+                    if qdelta_bellman is not None:
+                        _w_diag = qdelta_bellman.weight_np(
+                            env_buf.s[idx], env_buf.a[idx])
+                        diag += (f" w_qd=[{_w_diag.min():.2f},"
+                                 f"{_w_diag.mean():.2f},{_w_diag.max():.2f}]")
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
 
@@ -782,7 +878,7 @@ def main():
                         f"φ_n={icrl_metrics['phi_nominal']:.3f} "
                         f"sep={icrl_metrics['separation']:.3f} kl={icrl_metrics['kl']:.3f}")
 
-                # Role #3: periodic constraint audit
+                # Role #3: periodic constraint audit + Role #4: prune LLM constraints
                 if constraint_sys is not None and step % (EVAL_INTERVAL * 2) == 0:
                     idx_audit = np.random.randint(0, env_buf.size, min(1000, env_buf.size))
                     ns_audit, r_audit = corrected.predict(
@@ -791,11 +887,34 @@ def main():
                     constraint_sys.audit_suspicious(
                         env_buf.s[idx_audit], env_buf.a[idx_audit],
                         ns_audit, r_audit, corr_mag, step=step)
+                    # Role #4 prune: only after enough evidence (step >= 20k)
+                    if args.use_claude_llm and step >= EVAL_INTERVAL * 4:
+                        constraint_sys.prune_llm_constraints(step=step, min_checks=500)
 
         # Optional: save trained φ for cross-env transfer
         if icrl is not None and args.save_phi is not None and not icrl.is_frozen:
             icrl.save(args.save_phi)
             log(f"  [SAVE] ICRL φ saved to {args.save_phi}")
+
+        # End-of-training summaries for new modules.
+        if hasattr(residual, "log_llm_summary"):
+            residual.log_llm_summary()
+        if constraint_sys is not None and hasattr(constraint_sys, "log_llm_summary"):
+            if hasattr(constraint_sys, "finalize_async_llm"):
+                constraint_sys.finalize_async_llm(timeout=10.0)
+            constraint_sys.log_llm_summary()
+        if qdelta_bellman is not None:
+            # Final QΔ weight distribution on a sample of env_buf for diagnosis.
+            n_diag = min(1000, env_buf.size)
+            idx_diag = np.random.randint(0, env_buf.size, n_diag)
+            w_final = qdelta_bellman.weight_np(env_buf.s[idx_diag], env_buf.a[idx_diag])
+            log("")
+            log(f"┌─ [Bellman QΔ Final Stats] ──────────────")
+            log(f"│ γ_QΔ                : {args.qdelta_gamma}")
+            log(f"│ weight min/mean/max : {w_final.min():.3f} / {w_final.mean():.3f} / {w_final.max():.3f}")
+            log(f"│ weight std          : {w_final.std():.3f}")
+            log(f"│ τ (final)           : {qdelta_bellman._tau:.4f}")
+            log(f"└──────────────────────────────────────────")
 
         env_real.close()
 

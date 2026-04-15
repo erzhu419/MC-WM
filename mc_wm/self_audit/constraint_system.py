@@ -22,8 +22,10 @@ class Constraint:
     name: str
     description: str
     check_fn: object  # callable(s, a, s_corrected, r_corrected) → bool (True=violation)
-    source: str = "role1"  # "role1" or "role3"
+    source: str = "role1"  # "role1" | "role3" | "llm1" | "llm3"
     added_at_step: int = 0
+    n_checked: int = 0        # how many (s,a,s',r) this constraint has seen
+    n_rejected: int = 0       # how many it flagged as violating
 
 
 class ConstraintSystem:
@@ -41,16 +43,48 @@ class ConstraintSystem:
         cs.audit_and_expand(suspicious_transitions, step)
     """
 
-    def __init__(self, env_type="gravity_cheetah", log_fn=None):
+    def __init__(self, env_type="gravity_cheetah", log_fn=None,
+                 claude_oracle=None, env_description_for_llm: str = ""):
         self._log = log_fn or (lambda msg: print(msg, flush=True))
         self.constraints: List[Constraint] = []
         self._n_checked = 0
         self._n_rejected = 0
+        self._claude_oracle = claude_oracle
+        self._env_desc_llm = env_description_for_llm
+        # Role #1/#3/#4 counters.
+        self._llm_role1_proposed = 0
+        self._llm_role1_accepted = 0
+        self._llm_role3_calls = 0
+        self._llm_role3_new_constraints = 0
+        self._llm_role3_valid_corrections = 0
+        self._llm_role4_dropped_constraints = 0
+        # Decision history: each entry records an LLM action + its eventual
+        # fate, fed back to future LLM calls so it learns from past decisions.
+        #   {"step": int, "role": "role1"|"role3"|"role4_drop",
+        #    "name": str, "expr": str, "reason": str,
+        #    "outcome": {"reject_rate": float, "pruned_at": int|None, ...}}
+        self._llm_decision_history: list[dict] = []
+        # Training-state metrics (reward trend, policy entropy, buffer size)
+        # fed in from training loop via `update_training_metrics`.
+        self._training_metrics: dict = {"reward_trend": [], "buffer_size": 0}
+        # Async executor for Role #3 / Role #4 (never blocks training).
+        # max_workers=1 serializes LLM calls; pending futures are drained at
+        # the *next* audit step before issuing a new request.
+        from concurrent.futures import ThreadPoolExecutor
+        self._llm_executor = ThreadPoolExecutor(max_workers=1,
+                                                  thread_name_prefix="mcwm_llm")
+        self._pending_role3_future = None   # (future, step_submitted)
+        self._pending_role4_future = None   # (future, step_submitted)
 
-        # Role #1: Generate initial constraints
+        # Role #1: initial constraints (hardcoded physics).
         if env_type == "gravity_cheetah":
             self._init_gravity_cheetah()
-        self._log(f"  ConstraintSystem: {len(self.constraints)} initial constraints (Role #1)")
+        self._log(f"  ConstraintSystem: {len(self.constraints)} hardcoded "
+                  f"initial constraints (Role #1 physics)")
+
+        # Role #1 LLM extension: ask Claude for additional env-specific constraints.
+        if self._claude_oracle is not None and self._env_desc_llm:
+            self._augment_with_llm_role1()
 
     def _init_gravity_cheetah(self):
         """
@@ -136,12 +170,15 @@ class ConstraintSystem:
         Check if a corrected transition violates any constraint.
 
         Returns: (ok: bool, violations: list of constraint names)
+        Also updates per-constraint n_checked / n_rejected for Role #4 pruning.
         """
         violations = []
         for c in self.constraints:
+            c.n_checked += 1
             try:
                 if c.check_fn(s, a, s_corrected, r_corrected):
                     violations.append(c.name)
+                    c.n_rejected += 1
             except Exception:
                 pass  # constraint evaluation error → skip
 
@@ -170,6 +207,356 @@ class ConstraintSystem:
 
         return ok_mask, violation_counts
 
+    # ──────────────────────────────────────────────────────────────────
+    # LLM (Role #1 / #3) integration
+    # ──────────────────────────────────────────────────────────────────
+
+    def _compile_llm_check(self, expr: str):
+        """
+        Compile an LLM-proposed `check` expression into a safe check_fn.
+
+        Expression is a Python boolean returning True iff the transition is
+        INFEASIBLE (should be rejected).  Namespace: s, a, sc (s_corrected),
+        r (r_corrected), s_next (alias for sc), abs, np.  Blocks attribute
+        access, imports, dunders.
+        """
+        if not expr or not isinstance(expr, str):
+            return None
+        lowered = expr.strip()
+        if any(bad in lowered for bad in ("__", "import ", "open(", "os.", "sys.",
+                                           "eval(", "exec(", "subprocess", "compile(")):
+            return None
+        import numpy as np
+        safe_globals = {"__builtins__": {"abs": abs, "max": max, "min": min,
+                                           "any": any, "all": all, "range": range,
+                                           "len": len, "True": True, "False": False}}
+        safe_globals["np"] = np
+        # Pre-compile for cheap per-call eval.
+        try:
+            code = compile(expr, "<llm_constraint>", "eval")
+        except SyntaxError:
+            return None
+
+        def check_fn(s, a, sc, r, _code=code, _g=safe_globals):
+            try:
+                return bool(eval(_code, _g,
+                                 {"s": s, "a": a, "sc": sc, "r": r,
+                                  "s_next": sc}))
+            except Exception:
+                return False  # eval failure ⇒ treat as feasible (conservative)
+        return check_fn
+
+    def _augment_with_llm_role1(self):
+        """Ask Claude for extra env-specific constraints and register them."""
+        self._log("  [LLM Role #1] querying Claude for additional constraints ...")
+        proposals = self._claude_oracle.role1_initial_constraints(self._env_desc_llm)
+        for c in proposals or []:
+            self._llm_role1_proposed += 1
+            name = c.get("name", "llm_unnamed")
+            check_expr = c.get("check", "")
+            why = c.get("why", "")
+            fn = self._compile_llm_check(check_expr)
+            if fn is None:
+                self._log(f"    ✗ rejected (unsafe/syntax): {name}  {check_expr[:60]}")
+                continue
+            self.constraints.append(Constraint(
+                name=f"llm1_{name}", description=f"{check_expr}  // {why[:80]}",
+                check_fn=fn, source="llm1",
+            ))
+            self._llm_role1_accepted += 1
+            self._llm_decision_history.append({
+                "step": 0, "role": "role1_add",
+                "name": f"llm1_{name}", "expr": check_expr,
+                "reason": why[:80], "outcome": None,
+            })
+            self._log(f"    + {name}: {check_expr[:70]}")
+        self._log(f"  [LLM Role #1] accepted {self._llm_role1_accepted}/"
+                  f"{self._llm_role1_proposed}; total constraints now "
+                  f"{len(self.constraints)}")
+
+    def _llm_role3_extend(self, suspicious_states, suspicious_actions,
+                           suspicious_corr, step: int):
+        """
+        Role #3 (ASYNC): submit Claude audit request on a background thread;
+        training returns immediately.  The response is applied at the NEXT
+        `audit_suspicious` call via `_apply_completed_role3_future`.
+        """
+        if self._claude_oracle is None:
+            return
+        self._llm_role3_calls += 1
+        transitions = []
+        n = min(5, len(suspicious_states))
+        for i in range(n):
+            transitions.append({
+                "s": [round(float(x), 3) for x in suspicious_states[i]],
+                "a": [round(float(x), 3) for x in suspicious_actions[i]],
+                "correction_magnitude": round(
+                    float(np.linalg.norm(suspicious_corr[i])), 2),
+            })
+        # FULL constraint list (not just last 10) so LLM sees redundancy.
+        existing = [f"{c.name}: {c.description}" for c in self.constraints]
+        per_constraint = [
+            {"name": c.name,
+             "reject_count": c.n_rejected,
+             "total_checks": c.n_checked,
+             "reject_rate": round(c.n_rejected / max(1, c.n_checked), 4),
+             "source": c.source}
+            for c in self.constraints
+        ]
+        sys_rate = self._n_rejected / max(1, self._n_checked)
+        if self._pending_role3_future is not None and not self._pending_role3_future[0].done():
+            self._log(f"    [LLM Role #3] prior request still pending, skip submit")
+            return
+        history_sum = self._recent_history_summary()
+        future = self._llm_executor.submit(
+            self._claude_oracle.role3_audit,
+            self._env_desc_llm, transitions, existing,
+            step, sys_rate, per_constraint,
+            history_sum,
+            dict(self._training_metrics),
+        )
+        self._pending_role3_future = (future, step)
+        self._log(f"    [LLM Role #3] ctx: constraints={len(existing)}, "
+                  f"sys_reject={sys_rate:.1%}, history={len(history_sum)} entries, "
+                  f"reward_trend_len={len(self._training_metrics.get('reward_trend',[]))}")
+        self._log(f"    [LLM Role #3] async submit (step={step})")
+
+    def _apply_completed_role3_future(self):
+        """Called by audit_suspicious at start; apply pending Role #3 if done."""
+        if self._pending_role3_future is None:
+            return
+        future, submit_step = self._pending_role3_future
+        if not future.done():
+            return  # still running, leave for next audit
+        self._pending_role3_future = None
+        try:
+            verdict = future.result(timeout=0.0)
+        except Exception as e:
+            self._log(f"    [LLM Role #3 async] call failed: {e}")
+            return
+        if not verdict:
+            return
+        self._log(f"    [LLM Role #3] verdict (submitted step={submit_step}): "
+                  f"{verdict.get('verdict','?')}")
+        reasoning = verdict.get("reasoning", "")
+        if reasoning:
+            self._log(f"    reasoning: {reasoning[:180]}")
+        if verdict.get("verdict") == "valid_large_correction":
+            self._llm_role3_valid_corrections += 1
+            return
+        new_c = verdict.get("new_constraint")
+        if not isinstance(new_c, dict):
+            return
+        fn = self._compile_llm_check(new_c.get("check", ""))
+        if fn is None:
+            self._log(f"    ✗ Role #3 check invalid: {new_c.get('check','')[:60]}")
+            return
+        added_name = f"llm3_{new_c.get('name','unnamed')}_step{submit_step}"
+        self.constraints.append(Constraint(
+            name=added_name,
+            description=f"{new_c.get('check','')}  // {new_c.get('why','')[:80]}",
+            check_fn=fn, source="llm3", added_at_step=submit_step,
+        ))
+        self._llm_role3_new_constraints += 1
+        self._llm_decision_history.append({
+            "step": submit_step, "role": "role3_add",
+            "name": added_name, "expr": new_c.get("check", ""),
+            "reason": new_c.get("why", "")[:80], "outcome": None,
+        })
+        self._log(f"    + Role #3 added constraint: {new_c.get('name','?')}: "
+                  f"{new_c.get('check','')[:70]}")
+
+    def prune_llm_constraints(self, step: int = 0, min_checks: int = 1000) -> int:
+        """
+        Role #4 (ASYNC): submit prune request in background.  The drop decision
+        is applied at the next `prune_llm_constraints` call via
+        `_apply_completed_role4_future`.
+
+        Returns: number of constraints dropped *this call* (from a previously-
+        completed async request), not from the one just submitted.
+        """
+        if self._claude_oracle is None:
+            return 0
+        # 1. Apply any previously-completed Role #4 decision first.
+        dropped_now = self._apply_completed_role4_future()
+        # 2. If a request is still pending, do NOT submit a new one.
+        if self._pending_role4_future is not None and not self._pending_role4_future[0].done():
+            return dropped_now
+        # 3. Submit new Role #4 request (non-blocking).
+        eligible = [c for c in self.constraints
+                    if c.source in ("llm1", "llm3") and c.n_checked >= min_checks]
+        if not eligible:
+            return dropped_now
+        stats_payload = [
+            {
+                "name": c.name,
+                "expr": c.description.split("//")[0].strip(),
+                "why": c.description.split("//")[-1].strip() if "//" in c.description else "",
+                "source": c.source,
+                "reject_count": c.n_rejected,
+                "total_checks": c.n_checked,
+                "reject_rate": round(c.n_rejected / max(1, c.n_checked), 4),
+            }
+            for c in eligible
+        ]
+        # Enrich context: hardcoded constraint names + system reject rate +
+        # violation trend (stored by caller — see `update_violation_trend`).
+        hc_names = [c.name for c in self.constraints if c.source == "role1"]
+        sys_rate = self._n_rejected / max(1, self._n_checked)
+        trend = getattr(self, "_violation_trend", [])
+        history_sum = self._recent_history_summary()
+        future = self._llm_executor.submit(
+            self._claude_oracle.role4_prune_constraints,
+            self._env_desc_llm, stats_payload,
+            step, sys_rate, trend, hc_names,
+            history_sum,
+            dict(self._training_metrics),
+        )
+        self._pending_role4_future = (future, step)
+        self._log(f"    [LLM Role #4] async submit (reviewing {len(eligible)} LLM constraints, "
+                  f"sys_reject={sys_rate:.1%}, viol_trend[-3:]={trend[-3:] if trend else []}, "
+                  f"history={len(history_sum)} entries)")
+        return dropped_now
+
+    def update_violation_trend(self, avg_violations_per_ep: float) -> None:
+        """External hook — caller (training script) feeds each eval's viol/ep."""
+        if not hasattr(self, "_violation_trend"):
+            self._violation_trend = []
+        self._violation_trend.append(float(avg_violations_per_ep))
+        self._violation_trend = self._violation_trend[-20:]
+
+    def update_training_metrics(self, reward: float = None, buffer_size: int = None,
+                                  policy_entropy: float = None) -> None:
+        """
+        External hook: feed in current training-state metrics for LLM context.
+        Called from training loop each eval.
+        """
+        if reward is not None:
+            self._training_metrics["reward_trend"].append(float(reward))
+            self._training_metrics["reward_trend"] = self._training_metrics["reward_trend"][-20:]
+        if buffer_size is not None:
+            self._training_metrics["buffer_size"] = int(buffer_size)
+        if policy_entropy is not None:
+            self._training_metrics["policy_entropy"] = float(policy_entropy)
+
+    def _recent_history_summary(self, max_entries: int = 10) -> list[dict]:
+        """Summarise last N decisions (newest first) for LLM feedback prompts."""
+        entries = list(reversed(self._llm_decision_history[-max_entries:]))
+        return [
+            {"step": e["step"], "role": e["role"], "name": e["name"],
+             "reason": e.get("reason", "")[:100],
+             "outcome": e.get("outcome")}
+            for e in entries
+        ]
+
+    def _apply_completed_role4_future(self) -> int:
+        """Drain finished Role #4 future and apply drops.  Returns #dropped."""
+        if self._pending_role4_future is None:
+            return 0
+        future, submit_step = self._pending_role4_future
+        if not future.done():
+            return 0
+        self._pending_role4_future = None
+        try:
+            to_drop = future.result(timeout=0.0)
+        except Exception as e:
+            self._log(f"    [LLM Role #4 async] call failed: {e}")
+            return 0
+        if not to_drop:
+            self._log(f"    [LLM Role #4] reviewed, kept all")
+            return 0
+        drop_set = set(to_drop)
+        kept, dropped_names = [], []
+        # Snapshot reject stats of soon-to-be-dropped constraints for history.
+        drop_stats = {c.name: {"reject_rate": c.n_rejected / max(1, c.n_checked),
+                               "total_checks": c.n_checked}
+                      for c in self.constraints if c.name in drop_set}
+        for c in self.constraints:
+            if c.name in drop_set and c.source in ("llm1", "llm3"):
+                dropped_names.append(c.name)
+            else:
+                kept.append(c)
+        self.constraints = kept
+        self._llm_role4_dropped_constraints += len(dropped_names)
+        # Update outcome of the dropped constraint's original add-decision.
+        step_now = submit_step
+        n_outcome_filled = 0
+        for entry in self._llm_decision_history:
+            if entry["name"] in drop_set and entry["outcome"] is None:
+                entry["outcome"] = {
+                    "pruned_at_step": step_now,
+                    "final_reject_rate": drop_stats.get(entry["name"], {}).get("reject_rate", 0.0),
+                    "total_checks": drop_stats.get(entry["name"], {}).get("total_checks", 0),
+                }
+                n_outcome_filled += 1
+        if n_outcome_filled:
+            self._log(f"    [LLM history] filled {n_outcome_filled} outcomes "
+                      f"(feeds back into future Role #2/#3/#4 prompts)")
+        # Record the prune decision itself.
+        for name in dropped_names:
+            self._llm_decision_history.append({
+                "step": step_now, "role": "role4_drop",
+                "name": name, "expr": "",
+                "reason": f"dropped at step {step_now}",
+                "outcome": None,
+            })
+        self._log(f"    [LLM Role #4] dropped {len(dropped_names)}: "
+                  f"{dropped_names[:5]}")
+        return len(dropped_names)
+
+    def get_llm_summary(self) -> dict:
+        s = {"role1_proposed": self._llm_role1_proposed,
+             "role1_accepted": self._llm_role1_accepted,
+             "role3_calls": self._llm_role3_calls,
+             "role3_new_constraints": self._llm_role3_new_constraints,
+             "role3_valid_corrections": self._llm_role3_valid_corrections,
+             "role4_dropped_constraints": getattr(self, "_llm_role4_dropped_constraints", 0)}
+        if self._claude_oracle is not None and hasattr(self._claude_oracle, "stats"):
+            s.update({"oracle_" + k: v for k, v in
+                      self._claude_oracle.stats().items()})
+        return s
+
+    def finalize_async_llm(self, timeout: float = 5.0):
+        """
+        Wait briefly for any in-flight LLM calls to finish and apply their
+        results.  Called at end-of-training so final summary reflects all
+        completed work.  timeout protects against hangs.
+        """
+        if self._claude_oracle is None:
+            return
+        import time
+        deadline = time.time() + timeout
+        for name, slot_attr, apply_fn in [
+            ("role3", "_pending_role3_future", self._apply_completed_role3_future),
+            ("role4", "_pending_role4_future", self._apply_completed_role4_future),
+        ]:
+            pending = getattr(self, slot_attr, None)
+            if pending is None:
+                continue
+            future, _ = pending
+            remaining = max(0.0, deadline - time.time())
+            try:
+                future.result(timeout=remaining)
+            except Exception:
+                pass
+            apply_fn()
+        # Shutdown executor (prevents zombie thread at exit).
+        self._llm_executor.shutdown(wait=False, cancel_futures=True)
+
+    def log_llm_summary(self):
+        if self._claude_oracle is None:
+            return
+        s = self.get_llm_summary()
+        self._log("")
+        self._log("┌─ [ConstraintSystem LLM Summary] ────────")
+        self._log(f"│ Role #1 proposed  : {s['role1_proposed']}")
+        self._log(f"│ Role #1 accepted  : {s['role1_accepted']}")
+        self._log(f"│ Role #3 calls     : {s['role3_calls']}")
+        self._log(f"│ Role #3 new cstr  : {s['role3_new_constraints']}")
+        self._log(f"│ Role #3 accepted as valid: {s['role3_valid_corrections']}")
+        self._log(f"│ Role #4 dropped constraints: {s['role4_dropped_constraints']}")
+        self._log(f"└─────────────────────────────────────────")
+
     def add_constraint(self, name, description, check_fn, step=0):
         """Role #3: Add a new constraint (monotonic growth)."""
         self.constraints.append(Constraint(
@@ -185,7 +572,13 @@ class ConstraintSystem:
         Role #3: Find suspicious corrections and potentially add new constraints.
 
         Suspicious = passes all current constraints BUT correction is unusually large.
+
+        Note: Role #3 LLM calls are ASYNC — this method returns immediately
+        after submitting; the verdict is applied at the NEXT audit call.
         """
+        # Drain any pending Role #3 future from previous audit (non-blocking).
+        self._apply_completed_role3_future()
+
         N = len(states)
         ok_mask, _ = self.check_batch(states, actions, s_corrected, r_corrected)
 
@@ -221,6 +614,12 @@ class ConstraintSystem:
                         abs(s[d]) > mv and abs(sc[d] - s[d]) > 3.0,
                     step=step,
                 )
+
+        # Role #3 LLM extension: ask Claude to verify the suspicious batch and
+        # propose one additional constraint if truly infeasible.  Only run
+        # when oracle is set AND at least 3 suspicious samples (avoid noisy calls).
+        if self._claude_oracle is not None and n_suspicious >= 3:
+            self._llm_role3_extend(sus_states, actions[suspicious], sus_corr, step)
 
     def get_stats(self):
         return {
