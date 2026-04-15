@@ -6,45 +6,48 @@ Combines three ICRL insights:
 2. Hugessen 2024: L1/L2 regularization prevents constraint collapse
 3. Critical ICRL 2025: Constraints transfer across environments better than rewards
 
-MC-WM extension (novel):
-  φ(s,a) also conditions on MODEL CONFIDENCE from QΔ/SINDy:
-  - Expert went there + model accurate → definitely feasible (φ≈1)
-  - Expert avoided it + model accurate + high reward → constrained (φ≈0)
-  - Expert avoided it + model inaccurate → uncertain (φ≈0.5)
-  - Expert avoided it + low reward → just not worth it (φ≈0.7)
+MC-WM v2 (dynamics-gap optimized):
+  In environments WITHOUT spatial constraints (e.g., GravityCheetah),
+  standard ICRL learns a signal redundant with QΔ.
 
-This uses the residual world model as an additional signal that
-standard ICRL methods don't have.
+  Fix: φ(s, a, Δs) discriminates DYNAMICS, not locations.
+  - Expert Δs comes from real env (gravity=1x)
+  - Nominal Δs comes from raw M_sim (gravity=2x, no δ correction)
+  - φ learns: "does this transition look like real dynamics?"
 
-Integration: final_weight = QΔ_weight × φ(s,a)
+  This is COMPLEMENTARY to QΔ:
+  - QΔ: "is the corrected model accurate here?" (per-step prediction error)
+  - φ:  "is this state-action-transition in the real dynamics manifold?"
+
+  Combination: w = QΔ × (0.5 + 0.5×φ)  (soft modulation, not multiplicative kill)
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 
 
 class FeasibilityNet(nn.Module):
     """
-    φ(s,a) ∈ [0,1]: probability that (s,a) is feasible.
+    φ(s, a, Δs) ∈ [0,1]: probability that transition (s,a)→s' is from real dynamics.
 
-    Architecture: MLP with sigmoid output.
-    Input: [s, a] concatenated (optionally + model_confidence).
-    Output: scalar φ ∈ [0,1].
+    Two modes:
+      - use_transition=True:  input = [s, a, Δs]  (dynamics discriminator)
+      - use_transition=False: input = [s, a, conf]  (legacy, model confidence)
     """
 
     def __init__(self, obs_dim, act_dim, hidden_sizes=(128, 128),
-                 use_model_confidence=True):
+                 use_transition=True):
         super().__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
-        self.use_model_confidence = use_model_confidence
+        self.use_transition = use_transition
 
-        input_dim = obs_dim + act_dim
-        if use_model_confidence:
-            input_dim += 1  # extra dim for model confidence score
+        if use_transition:
+            input_dim = obs_dim + act_dim + obs_dim  # [s, a, Δs]
+        else:
+            input_dim = obs_dim + act_dim + 1  # [s, a, conf]
 
         layers = []
         prev = input_dim
@@ -55,39 +58,31 @@ class FeasibilityNet(nn.Module):
         layers.append(nn.Sigmoid())
         self.net = nn.Sequential(*layers)
 
-    def forward(self, obs, acs, model_conf=None):
+    def forward(self, obs, acs, extra):
         """
-        obs: (B, obs_dim)
-        acs: (B, act_dim)
-        model_conf: (B, 1) optional — QΔ/model prediction confidence
-        Returns: φ(s,a) shape (B, 1)
+        obs:   (B, obs_dim)
+        acs:   (B, act_dim)
+        extra: (B, obs_dim) if use_transition else (B, 1) model confidence
+        Returns: φ shape (B, 1)
         """
-        if self.use_model_confidence and model_conf is not None:
-            x = torch.cat([obs, acs, model_conf], dim=-1)
-        else:
-            x = torch.cat([obs, acs], dim=-1)
+        x = torch.cat([obs, acs, extra], dim=-1)
         return self.net(x)
-
-    def cost(self, obs, acs, model_conf=None):
-        """Cost = 1 - φ. High cost = likely constrained."""
-        return 1.0 - self.forward(obs, acs, model_conf)
 
 
 class ResidualAwareICRL:
     """
-    Learn feasibility function φ(s,a) from:
-    - Expert data (real env transitions) — assumed feasible
-    - Nominal data (model rollouts / sim) — may violate constraints
-    - Model confidence (QΔ) — additional signal unique to MC-WM
+    Learn dynamics discriminator φ(s, a, Δs) from:
+    - Expert data: real env transitions (s, a, s'_real)
+    - Nominal data: raw sim predictions  (s, a, s'_sim) — NO δ correction
 
-    Training: alternating forward (policy) and backward (constraint) steps.
-
-    Malik-style importance sampling: reweight nominal data by trajectory-level
-    likelihood ratio to distinguish "constrained away" from "just low reward".
+    Key difference from v1:
+    - Negatives come from raw M_sim, not corrected model buffer
+    - φ discriminates dynamics (transition shape), not spatial location
+    - This gives a signal COMPLEMENTARY to QΔ in dynamics-gap environments
     """
 
     def __init__(self, obs_dim, act_dim, hidden_sizes=(128, 128),
-                 lr=3e-4, reg_coeff=0.1, use_model_confidence=True,
+                 lr=3e-4, reg_coeff=0.05, use_transition=True,
                  target_kl=10.0, device="cpu", log_fn=None):
         self.obs_dim = obs_dim
         self.act_dim = act_dim
@@ -95,190 +90,187 @@ class ResidualAwareICRL:
         self._log = log_fn or (lambda msg: print(msg, flush=True))
         self.reg_coeff = reg_coeff
         self.target_kl = target_kl
+        self.use_transition = use_transition
 
         self.phi_net = FeasibilityNet(
             obs_dim, act_dim, hidden_sizes,
-            use_model_confidence=use_model_confidence,
+            use_transition=use_transition,
         ).to(device)
         self.optimizer = optim.Adam(self.phi_net.parameters(), lr=lr, weight_decay=1e-5)
 
-        # Expert data (real transitions, loaded once)
+        # Expert data (real transitions)
         self._expert_obs = None
         self._expert_acs = None
-        self._expert_conf = None  # model confidence on expert data
+        self._expert_extra = None  # Δs for transition mode, conf for legacy
 
         # Normalization stats
         self._obs_mean = None
         self._obs_std = None
+        self._delta_mean = None
+        self._delta_std = None
 
         # Diagnostics
         self._train_history = []
 
-    def set_expert_data(self, obs, acs, model_confidence=None):
-        """Load expert (real env) data. Called once before training."""
+    def set_expert_data(self, obs, acs, next_obs=None, model_confidence=None):
+        """
+        Load expert (real env) data. Called once before training.
+
+        For transition mode: pass next_obs (s'_real).
+        For legacy mode: pass model_confidence.
+        """
         self._expert_obs = torch.FloatTensor(obs).to(self.device)
         self._expert_acs = torch.FloatTensor(acs).to(self.device)
-        if model_confidence is not None:
-            self._expert_conf = torch.FloatTensor(
+
+        if self.use_transition and next_obs is not None:
+            delta = next_obs - obs  # Δs = s' - s
+            self._expert_extra = torch.FloatTensor(delta).to(self.device)
+            # Normalize delta separately (dynamics have different scale than states)
+            self._delta_mean = self._expert_extra.mean(0)
+            self._delta_std = self._expert_extra.std(0).clamp(min=1e-6)
+        elif model_confidence is not None:
+            self._expert_extra = torch.FloatTensor(
                 model_confidence.reshape(-1, 1)).to(self.device)
         else:
-            self._expert_conf = torch.ones(len(obs), 1).to(self.device)
+            self._expert_extra = torch.ones(len(obs), 1).to(self.device)
 
-        # Compute normalization
+        # Compute observation normalization
         self._obs_mean = self._expert_obs.mean(0)
         self._obs_std = self._expert_obs.std(0).clamp(min=1e-6)
 
-        self._log(f"  ICRL: {len(obs)} expert transitions loaded")
+        self._log(f"  ICRL: {len(obs)} expert transitions loaded "
+                  f"(mode={'transition' if self.use_transition else 'confidence'})")
 
     def _normalize_obs(self, obs):
         if self._obs_mean is not None:
             return (obs - self._obs_mean) / self._obs_std
         return obs
 
-    def train_constraint(self, nominal_obs, nominal_acs, nominal_conf=None,
-                          n_iters=10, batch_size=512):
-        """
-        Backward step: update φ(s,a) to distinguish expert from nominal.
+    def _normalize_delta(self, delta):
+        if self._delta_mean is not None:
+            return (delta - self._delta_mean) / self._delta_std
+        return delta
 
-        Uses likelihood-based loss (Malik 2021):
-          L = -E_expert[log φ] + E_nominal[w · log φ] + reg
-        where w = importance weights (trajectory-level reweighting).
+    def _prepare_extra(self, extra_np):
+        """Convert numpy extra input to normalized tensor.
+
+        - transition mode: (N, obs_dim) → normalized
+        - confidence mode: (N,) or (N, 1) → reshaped to (N, 1)
+        """
+        t = torch.FloatTensor(extra_np).to(self.device)
+        if self.use_transition:
+            if t.dim() == 2 and t.shape[1] == self.obs_dim:
+                return self._normalize_delta(t)
+            return t
+        # confidence mode: ensure (N, 1)
+        if t.dim() == 1:
+            t = t.unsqueeze(-1)
+        return t
+
+    def train_constraint(self, nominal_obs, nominal_acs, nominal_extra,
+                          n_iters=3, batch_size=512):
+        """
+        Update φ via plain BCE: label 1 for expert, 0 for nominal.
+
+        Simpler and more stable than IS-weighted log loss:
+        - BCE directly pulls φ_expert→1, φ_nominal→0
+        - No drift/collapse (seen in IS version where φ_expert decayed to 0.19)
+        - Fewer iters (3 vs 10) to prevent overfitting to batch
         """
         n_expert = len(self._expert_obs)
         n_nominal = len(nominal_obs)
 
         nom_obs_t = torch.FloatTensor(nominal_obs).to(self.device)
         nom_acs_t = torch.FloatTensor(nominal_acs).to(self.device)
-        if nominal_conf is not None:
-            nom_conf_t = torch.FloatTensor(nominal_conf.reshape(-1, 1)).to(self.device)
-        else:
-            nom_conf_t = torch.ones(n_nominal, 1).to(self.device)
+        nom_extra_t = self._prepare_extra(nominal_extra)
 
-        # Store old predictions for importance sampling
-        with torch.no_grad():
-            nom_obs_norm = self._normalize_obs(nom_obs_t)
-            preds_old = self.phi_net(nom_obs_norm, nom_acs_t, nom_conf_t).squeeze()
+        exp_extra_norm = (self._normalize_delta(self._expert_extra)
+                          if self.use_transition else self._expert_extra)
+        nom_extra_norm = (self._normalize_delta(nom_extra_t)
+                          if self.use_transition else nom_extra_t)
 
-        metrics = {}
+        eps = 1e-6
         for it in range(n_iters):
-            # Sample batches
             exp_idx = np.random.choice(n_expert, min(batch_size, n_expert), replace=False)
             nom_idx = np.random.choice(n_nominal, min(batch_size, n_nominal), replace=False)
 
             exp_obs = self._normalize_obs(self._expert_obs[exp_idx])
             exp_acs = self._expert_acs[exp_idx]
-            exp_conf = self._expert_conf[exp_idx]
+            exp_ext = exp_extra_norm[exp_idx]
 
             nom_obs = self._normalize_obs(nom_obs_t[nom_idx])
             nom_acs = nom_acs_t[nom_idx]
-            nom_conf = nom_conf_t[nom_idx]
+            nom_ext = nom_extra_norm[nom_idx]
 
-            # Forward
-            phi_expert = self.phi_net(exp_obs, exp_acs, exp_conf)
-            phi_nominal = self.phi_net(nom_obs, nom_acs, nom_conf)
+            phi_expert = self.phi_net(exp_obs, exp_acs, exp_ext).clamp(eps, 1 - eps)
+            phi_nominal = self.phi_net(nom_obs, nom_acs, nom_ext).clamp(eps, 1 - eps)
 
-            eps = 1e-8
-            # Expert loss: maximize log φ(expert) — expert should be feasible
-            expert_loss = -torch.log(phi_expert + eps).mean()
-
-            # Nominal loss: importance-weighted
-            # Compute IS weights from old vs new predictions
-            preds_new_batch = phi_nominal.squeeze()
-            preds_old_batch = preds_old[nom_idx]
-            is_ratio = (preds_new_batch + eps) / (preds_old_batch + eps)
-            is_weights = is_ratio / (is_ratio.sum() + eps) * len(is_ratio)
-
-            # Nominal should have LOW φ (constrained regions)
-            nominal_loss = (is_weights.detach() * torch.log(phi_nominal.squeeze() + eps)).mean()
-
-            # Regularization: push expert toward 1.0, nominal toward 0.0
-            # (not 0.5 — that was making both sides collapse to ~0.4)
-            reg_loss = self.reg_coeff * (
-                (phi_expert - 1.0).pow(2).mean() +  # expert should be feasible
-                phi_nominal.pow(2).mean()             # nominal should be constrained
-            )
-
-            loss = expert_loss + nominal_loss + reg_loss
+            # BCE: expert→1, nominal→0
+            loss = -(torch.log(phi_expert).mean() + torch.log(1 - phi_nominal).mean())
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
 
-            # KL divergence check (early stopping à la Malik)
-            with torch.no_grad():
-                nom_obs_all = self._normalize_obs(nom_obs_t)
-                preds_new_all = self.phi_net(nom_obs_all, nom_acs_t, nom_conf_t).squeeze()
-                ratio = (preds_new_all + eps) / (preds_old + eps)
-                kl = -torch.log(ratio + eps).mean()
-                if kl > self.target_kl:
-                    break
-
-        # Update old predictions
-        with torch.no_grad():
-            preds_old = preds_new_all
-
         # Diagnostics
         with torch.no_grad():
+            n_diag = min(500, n_expert, n_nominal)
             phi_exp_mean = self.phi_net(
-                self._normalize_obs(self._expert_obs[:500]),
-                self._expert_acs[:500],
-                self._expert_conf[:500]).mean()
+                self._normalize_obs(self._expert_obs[:n_diag]),
+                self._expert_acs[:n_diag],
+                exp_extra_norm[:n_diag]).mean()
             phi_nom_mean = self.phi_net(
-                self._normalize_obs(nom_obs_t[:500]),
-                nom_acs_t[:500],
-                nom_conf_t[:500]).mean()
+                self._normalize_obs(nom_obs_t[:n_diag]),
+                nom_acs_t[:n_diag],
+                nom_extra_norm[:n_diag]).mean()
 
         metrics = {
             "phi_expert": float(phi_exp_mean),
             "phi_nominal": float(phi_nom_mean),
             "separation": float(phi_exp_mean - phi_nom_mean),
-            "kl": float(kl),
+            "kl": 0.0,  # not tracked in BCE version
             "iters": it + 1,
         }
         self._train_history.append(metrics)
         return metrics
 
-    def get_feasibility(self, obs, acs, model_confidence=None):
+    def get_feasibility(self, obs, acs, delta_s=None, model_confidence=None):
         """
-        Get φ(s,a) for a batch of transitions.
+        Get φ(s,a,Δs) for a batch of transitions.
         Returns numpy array (N,) in [0, 1].
         """
         obs_t = torch.FloatTensor(obs).to(self.device)
         acs_t = torch.FloatTensor(acs).to(self.device)
-        if model_confidence is not None:
-            conf_t = torch.FloatTensor(model_confidence.reshape(-1, 1)).to(self.device)
+
+        if self.use_transition and delta_s is not None:
+            extra_t = self._normalize_delta(
+                torch.FloatTensor(delta_s).to(self.device))
+        elif model_confidence is not None:
+            extra_t = torch.FloatTensor(
+                model_confidence.reshape(-1, 1)).to(self.device)
         else:
-            conf_t = torch.ones(len(obs), 1).to(self.device)
+            extra_t = torch.zeros(len(obs), self.obs_dim if self.use_transition else 1).to(self.device)
 
         with torch.no_grad():
             obs_norm = self._normalize_obs(obs_t)
-            phi = self.phi_net(obs_norm, acs_t, conf_t).squeeze()
+            phi = self.phi_net(obs_norm, acs_t, extra_t).squeeze()
         return phi.cpu().numpy()
 
-    def get_constraint_weight(self, obs, acs, model_confidence=None):
+    def get_soft_weight(self, obs, acs, delta_s=None, model_confidence=None):
         """
-        Temperature-calibrated weight in [0, 1].
+        Soft modulation weight: 0.5 + 0.5 × φ  ∈ [0.5, 1.0].
 
-        Raw φ may not span [0,1] well (e.g., expert φ=0.4, nominal φ=0.2).
-        Calibrate: center on expert mean, scale by expert std, sigmoid.
-        Result: expert ≈ 0.8, nominal ≈ 0.3.
+        Designed for multiplicative use with QΔ:
+          w = QΔ × (0.5 + 0.5×φ)
+
+        φ≈1 (real-like transition) → weight ≈ 1.0 (trust QΔ fully)
+        φ≈0 (sim-like transition)  → weight ≈ 0.5 (halve QΔ weight)
+
+        This prevents φ from killing transitions (min weight = 0.5×QΔ),
+        while still giving a useful signal in dynamics-gap environments.
         """
-        phi = self.get_feasibility(obs, acs, model_confidence)
-
-        # Calibrate using expert statistics
-        if self._expert_obs is not None and len(self._train_history) > 0:
-            phi_expert_mean = self._train_history[-1].get("phi_expert", 0.5)
-            # Temperature: spread the distribution around expert mean
-            # z = (φ - threshold) / τ, where threshold = midpoint between expert and nominal
-            phi_nominal_mean = self._train_history[-1].get("phi_nominal", 0.3)
-            threshold = (phi_expert_mean + phi_nominal_mean) / 2
-            tau = max(phi_expert_mean - phi_nominal_mean, 0.05)  # separation as scale
-            z = (phi - threshold) / tau
-            # Sigmoid maps to [0,1]: expert side → ~0.7-0.9, nominal side → ~0.1-0.3
-            calibrated = 1.0 / (1.0 + np.exp(-z))
-            return calibrated
-
-        return phi
+        phi = self.get_feasibility(obs, acs, delta_s, model_confidence)
+        return 0.5 + 0.5 * phi
 
     def get_stats(self):
         if not self._train_history:
@@ -290,3 +282,44 @@ class ResidualAwareICRL:
             "separation": latest["separation"],
             "n_updates": len(self._train_history),
         }
+
+    def save(self, path):
+        """Save φ network + normalization stats to disk for cross-env transfer."""
+        torch.save({
+            "state_dict": self.phi_net.state_dict(),
+            "use_transition": self.use_transition,
+            "obs_dim": self.obs_dim,
+            "act_dim": self.act_dim,
+            "obs_mean": self._obs_mean.cpu() if self._obs_mean is not None else None,
+            "obs_std": self._obs_std.cpu() if self._obs_std is not None else None,
+            "delta_mean": self._delta_mean.cpu() if self._delta_mean is not None else None,
+            "delta_std": self._delta_std.cpu() if self._delta_std is not None else None,
+            "train_history": self._train_history,
+        }, path)
+
+    def load(self, path, freeze=True):
+        """Load φ from disk. If freeze=True, disable further training."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        assert ckpt["use_transition"] == self.use_transition, \
+            f"mode mismatch: saved={ckpt['use_transition']} self={self.use_transition}"
+        assert ckpt["obs_dim"] == self.obs_dim and ckpt["act_dim"] == self.act_dim, \
+            f"dim mismatch: saved=({ckpt['obs_dim']},{ckpt['act_dim']}) self=({self.obs_dim},{self.act_dim})"
+        self.phi_net.load_state_dict(ckpt["state_dict"])
+        if ckpt["obs_mean"] is not None:
+            self._obs_mean = ckpt["obs_mean"].to(self.device)
+            self._obs_std = ckpt["obs_std"].to(self.device)
+        if ckpt["delta_mean"] is not None:
+            self._delta_mean = ckpt["delta_mean"].to(self.device)
+            self._delta_std = ckpt["delta_std"].to(self.device)
+        self._train_history = list(ckpt.get("train_history", []))
+        self._frozen = freeze
+        if freeze:
+            for p in self.phi_net.parameters():
+                p.requires_grad = False
+        self._log(f"  ICRL loaded φ from {path} (frozen={freeze}, "
+                  f"last sep={self._train_history[-1]['separation']:.3f})" if self._train_history
+                  else f"  ICRL loaded φ from {path} (frozen={freeze})")
+
+    @property
+    def is_frozen(self):
+        return getattr(self, "_frozen", False)

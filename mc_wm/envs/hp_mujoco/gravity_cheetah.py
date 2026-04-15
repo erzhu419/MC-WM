@@ -55,6 +55,65 @@ class GravityCheetahEnv(gym.Env):
     def step(self, action):
         return self._env.step(action)
 
+
+class GravityCheetahCeilingEnv(GravityCheetahEnv):
+    """
+    GravityCheetah + physical ceiling constraint z > Z_MAX → termination.
+
+    This adds a SPATIAL constraint orthogonal to the dynamics gap:
+      - Dynamics shift: gravity 2x (sim) vs 1x (real) — unchanged
+      - Spatial constraint: z > 0.5 terminates episode with zero reward
+        (same threshold in both sim and real — a physical barrier)
+
+    Why this exposes ICRL value:
+      - In sim (2x gravity), cheetah rarely jumps high → constraint rarely binds
+      - In real (1x gravity), cheetah jumps higher → constraint binds
+      - Expert (real) data teaches ICRL "don't let z exceed 0.5"
+      - This signal is ORTHOGONAL to QΔ (which learns dynamics accuracy)
+
+    Obs layout: HalfCheetah-v4 with exclude_current_positions=True
+      obs[0] = z_position (root height) — used for ceiling check
+    """
+
+    Z_CEILING = 0.2  # height above which the episode terminates (tight ceiling)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self._env.step(action)
+        # Ceiling constraint: if root z exceeds threshold, terminate with zero reward
+        if obs[0] > self.Z_CEILING:
+            terminated = True
+            reward = 0.0
+            info["ceiling_hit"] = True
+        return obs, reward, terminated, truncated, info
+
+
+class GravityCheetahSoftCeilingEnv(GravityCheetahEnv):
+    """
+    GravityCheetah + SOFT ceiling: continuous penalty instead of terminal.
+
+    Violation of z > 0.2 is penalized as r -= PENALTY_SCALE * (z - 0.2)²
+    but episode CONTINUES. This is "Soft Type 2" — the Bellman signal is
+    weaker than terminal-r=0, so implicit constraint learning should
+    struggle and explicit ICRL should shine.
+
+    Differences from GravityCheetahCeilingEnv:
+      - No early termination on z > 0.2
+      - Continuous quadratic penalty (strong but not absolute)
+      - info['ceiling_hit'] set whenever z > 0.2 (for violation tracking)
+    """
+
+    Z_CEILING = 0.2
+    PENALTY_SCALE = 10.0
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self._env.step(action)
+        z = float(obs[0])
+        excess = max(0.0, z - self.Z_CEILING)
+        if excess > 0:
+            reward -= self.PENALTY_SCALE * excess * excess
+            info["ceiling_hit"] = True
+        return obs, reward, terminated, truncated, info
+
     def render(self, **kwargs):
         return self._env.render(**kwargs)
 

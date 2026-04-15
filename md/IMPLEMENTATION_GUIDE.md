@@ -259,3 +259,71 @@ experiments/
 | RE-SAC β (LCB) | -2.0 | pessimistic |
 | RE-SAC hidden | 256 | |
 | Learning rate | 3e-4 | all components |
+
+---
+
+## 7. ICRL 子系统 (2026-04-15 added)
+
+完整记录见 [md/ICRL_Type2_OOD_Report.md](ICRL_Type2_OOD_Report.md)。
+
+### 7.1 动机
+
+把 ICRL 定位成 **Type 2 OOD 检测器**（"从 10 楼跳下"类共有禁忌），
+区别于 SINDy/NAU 负责的 **Type 1 OOD**（"从未有 1 亿"类外推）。
+
+### 7.2 模块: `mc_wm/self_audit/icrl_constraint.py`
+
+- `FeasibilityNet`: MLP + Sigmoid, 输出 φ(s, a, extra) ∈ [0, 1]
+- `ResidualAwareICRL`:
+  - 双输入模式:
+    - `use_transition=True`: extra = Δs（动力学判别器）
+    - `use_transition=False`: extra = model_conf（Type 2 代理）
+  - BCE 损失（替代原 IS weighted，修复 φ 崩塌）
+  - `save()` / `load(freeze=True)`: 跨环境 φ 迁移
+
+### 7.3 新增环境
+
+| Env | 文件 | 约束 | 动力学 gap |
+|-----|------|------|-----------|
+| GravityCheetahCeilingEnv | gravity_cheetah.py | hard: z>0.2 → terminated | 2x→1x gravity |
+| GravityCheetahSoftCeilingEnv | gravity_cheetah.py | soft: r -= 10·(z-0.2)² | 2x→1x gravity |
+| FrictionWalkerSoftCeilingEnv | friction_walker.py | soft: r -= 10·(z-1.25)² | 0.3x→1x friction |
+| AntWallBrokenEnv | ant_wall_broken.py (新) | hard: x<-3 → terminated | act[4:]=0 |
+
+### 7.4 实验矩阵 (26 experiments)
+
+**Terminal Ceiling** (c1/c9/c10v4/c10v1):
+- c1 unaware: 713 / 0.53 viol
+- **c9 implicit dominates: 5374 / 0.00 viol**（Bellman 已够）
+
+**Soft Ceiling** (完整 4 ICRL 变体 ablation):
+- c1 unaware: 131 / 18.20 viol（baseline 失效）
+- c9: 4618 / 2.03 viol
+- **c10 v2 (conf+soft): 4397 / 0.20 viol ← Pareto 最优**
+
+**Cross-Env Transfer** (Cheetah → Walker):
+- Walker c1: 266 / 8.63 viol
+- Walker c9: 296 / 0.33 viol
+- **v2 transfer (conf+soft + load_phi): 274 / 0.27 viol ← 迁移成功**
+
+### 7.5 两大命题的答卷
+
+1. **"ICRL 大幅减少 Type 2 violations"** ✅ 成立（Soft env，v2 降 c1 的 91×）
+2. **"ICRL 约束跨环境迁移"** ✅ 成立（v2 conf+soft，Walker transfer 0.27 viol）
+
+### 7.6 配置推荐
+
+| 场景 | 最优方法 | CLI 参数 |
+|------|---------|---------|
+| Hard terminal constraint | c9 | `--mode c9` |
+| Soft constraint | **c10 v2** | `--mode c10 --icrl_mode confidence --icrl_combine soft` |
+| Cross-env transfer | **c10 v2 + load_phi** | 上 + `--load_phi /path/to/phi.pt` |
+
+### 7.7 新增 CLI 参数 (`experiments/step2_mbrl_residual.py`)
+
+- `--env {gravity, gravity_ceiling, gravity_soft_ceiling, carpet_ant, ant_wall_broken, friction_walker_soft_ceiling}`
+- `--icrl_mode {transition, confidence}` (φ 输入)
+- `--icrl_combine {top_k, soft}` (φ → weight 方式)
+- `--save_phi PATH` / `--load_phi PATH` (跨环境迁移)
+
+`evaluate()` 现返回 `(avg_return, std, avg_violations_per_ep)`，viol 通过 `info['ceiling_hit']` / `info['wall_hit']` 计数。

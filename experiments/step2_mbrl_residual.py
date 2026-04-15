@@ -21,7 +21,10 @@ warnings.filterwarnings('ignore')
 
 import numpy as np
 import torch
-from mc_wm.envs.hp_mujoco.gravity_cheetah import GravityCheetahEnv
+from mc_wm.envs.hp_mujoco.gravity_cheetah import GravityCheetahEnv, GravityCheetahCeilingEnv, GravityCheetahSoftCeilingEnv
+from mc_wm.envs.hp_mujoco.carpet_ant import CarpetAntEnv
+from mc_wm.envs.hp_mujoco.ant_wall_broken import AntWallBrokenEnv
+from mc_wm.envs.hp_mujoco.friction_walker import FrictionWalkerSoftCeilingEnv
 from mc_wm.policy.resac_agent import RESACAgent
 from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, CorrectedWorldModel
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
@@ -131,33 +134,68 @@ def collect_paired(env_cls, n_steps, policy_fn=None, seed=42):
 
 
 def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
-    env = env_cls(mode="real"); rets = []
+    """
+    Returns (avg_return, std_return, avg_violations_per_ep).
+
+    Violations = count of info['ceiling_hit'] / info['wall_hit'] events per episode
+    (Type 2 OOD access: agent reached a hard-constraint terminal region).
+    For envs without explicit constraints: violation count is always 0.
+    """
+    env = env_cls(mode="real"); rets = []; viols = []
     for ep in range(n_eps):
-        obs, _ = env.reset(seed=ep+200); total = 0.0
+        obs, _ = env.reset(seed=ep+200); total = 0.0; n_v = 0
         for _ in range(1000):
             a = agent.get_action(obs, deterministic=True)
-            obs, r, d, tr, _ = env.step(a); total += r
+            obs, r, d, tr, info = env.step(a); total += r
+            if info.get("ceiling_hit") or info.get("wall_hit"):
+                n_v += 1
             if d or tr: break
-        rets.append(total)
+        rets.append(total); viols.append(n_v)
     env.close()
-    return float(np.mean(rets)), float(np.std(rets))
+    return float(np.mean(rets)), float(np.std(rets)), float(np.mean(viols))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10"])
+    parser.add_argument("--env", default="gravity",
+                        choices=["gravity", "gravity_ceiling", "gravity_soft_ceiling",
+                                 "carpet_ant", "ant_wall_broken", "friction_walker_soft_ceiling"])
+    parser.add_argument("--icrl_mode", default="transition", choices=["transition", "confidence"],
+                        help="v4=transition (Δs discriminator), v1=confidence (model-conf input, Type 2 proxy)")
+    parser.add_argument("--save_phi", default=None, help="Path to save trained ICRL φ")
+    parser.add_argument("--load_phi", default=None, help="Path to load ICRL φ (freezes it)")
+    parser.add_argument("--icrl_combine", default="top_k", choices=["top_k", "soft"],
+                        help="v4 default=top_k (filter top 70%); v2/v3=soft (w=QΔ×(0.5+0.5×φ))")
     args = parser.parse_args()
     mode = args.mode
 
-    log_path = f"/tmp/step2_{mode}.log"
+    _suffix = f"_{args.icrl_mode}" if mode == "c10" else ""
+    if mode == "c10" and args.icrl_combine == "soft":
+        _suffix += "_soft"
+    if mode == "c10" and args.load_phi is not None:
+        _suffix += "_transfer"
+    log_path = f"/tmp/step2_{mode}_{args.env}{_suffix}.log"
     def log(msg=""):
         print(msg, flush=True)
         with open(log_path, "a") as f: f.write(str(msg) + "\n")
 
-    log(f"[{mode}] Device: {DEVICE}")
+    log(f"[{mode}/{args.env}] Device: {DEVICE}")
     log(f"Step 2: Model-Based RL with Residual World Model")
-    env_cls = GravityCheetahEnv
-    obs_dim = 17; act_dim = 6
+
+    # Environment selection
+    if args.env == "gravity":
+        env_cls = GravityCheetahEnv; obs_dim, act_dim = 17, 6
+    elif args.env == "gravity_ceiling":
+        env_cls = GravityCheetahCeilingEnv; obs_dim, act_dim = 17, 6
+    elif args.env == "gravity_soft_ceiling":
+        env_cls = GravityCheetahSoftCeilingEnv; obs_dim, act_dim = 17, 6
+    elif args.env == "carpet_ant":
+        env_cls = CarpetAntEnv; obs_dim, act_dim = 27, 8
+    elif args.env == "ant_wall_broken":
+        env_cls = AntWallBrokenEnv; obs_dim, act_dim = 27, 8
+    elif args.env == "friction_walker_soft_ceiling":
+        env_cls = FrictionWalkerSoftCeilingEnv; obs_dim, act_dim = 17, 6
 
     if mode == "c1":
         # ── Baseline: train in sim env directly
@@ -177,9 +215,9 @@ def main():
             if d or tr: obs, _ = env.reset()
             if step >= WARMUP and buf.size >= BATCH_SIZE: agent.update(buf)
             if step % EVAL_INTERVAL == 0:
-                ret, std = evaluate(agent, env_cls)
-                curve.append((step, ret))
-                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}")
+                ret, std, viol = evaluate(agent, env_cls)
+                curve.append((step, ret, viol))
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}")
         env.close()
 
     elif mode in ("c2", "c3"):
@@ -273,8 +311,8 @@ def main():
                     agent.update(model_buf)
 
             if step % EVAL_INTERVAL == 0:
-                ret, std = evaluate(agent, env_cls)
-                curve.append((step, ret))
+                ret, std, viol = evaluate(agent, env_cls)
+                curve.append((step, ret, viol))
 
                 # Diagnostics
                 diag = ""
@@ -288,7 +326,7 @@ def main():
                         env_buf.s[idx], env_buf.a[idx]).mean()
                     diag = f"  m_s={s_err:.3f} m_r={r_err:.3f} dis={disagree:.3f}"
 
-                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
 
         env.close()
@@ -373,8 +411,8 @@ def main():
                     agent.update(model_buf)
 
             if step % EVAL_INTERVAL == 0:
-                ret, std = evaluate(agent, env_cls)
-                curve.append((step, ret))
+                ret, std, viol = evaluate(agent, env_cls)
+                curve.append((step, ret, viol))
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
@@ -383,7 +421,7 @@ def main():
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
                     disagree = wm_real.get_disagreement(env_buf.s[idx], env_buf.a[idx]).mean()
                     diag = f"  m_s={s_err:.3f} dis={disagree:.3f}"
-                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
 
@@ -495,8 +533,8 @@ def main():
                     agent.update(model_buf)
 
             if step % EVAL_INTERVAL == 0:
-                ret, std = evaluate(agent, env_cls)
-                curve.append((step, ret))
+                ret, std, viol = evaluate(agent, env_cls)
+                curve.append((step, ret, viol))
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
@@ -504,7 +542,7 @@ def main():
                         env_buf.s[idx], env_buf.a[idx], deterministic=True)
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
                     diag = f"  m_s={s_err:.3f}"
-                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env_real.close()
 
@@ -571,17 +609,30 @@ def main():
         constraint_sys = ConstraintSystem(env_type="gravity_cheetah", log_fn=log) if mode == "c9" else None
 
         # ICRL learned constraint (c10)
+        # Two modes:
+        #   transition (v4): φ(s,a,Δs) — discriminates real vs sim dynamics (Type 1 territory)
+        #   confidence (v1): φ(s,a,model_conf) — flags low-confidence regions (Type 2 proxy)
         icrl = None
+        icrl_mode_used = args.icrl_mode
         if mode == "c10":
-            log(f"\n[ICRL] Initializing Residual-Aware ICRL constraint learner...")
-            # Compute model confidence on real data (QΔ-style: prediction error)
-            ns_real_pred, _ = corrected.predict(s_real[:len(s_real)], a_real[:len(a_real)], deterministic=True)
-            model_conf = 1.0 / (1.0 + np.mean((ns_real_pred - s2_real) ** 2, axis=1))
+            log(f"\n[ICRL] Initializing ICRL (mode={icrl_mode_used})...")
+            use_trans = (icrl_mode_used == "transition")
             icrl = ResidualAwareICRL(
                 obs_dim, act_dim, hidden_sizes=(128, 128),
-                lr=3e-4, reg_coeff=0.1, use_model_confidence=True,
+                lr=3e-4, reg_coeff=0.05, use_transition=use_trans,
                 target_kl=10.0, device=DEVICE, log_fn=log)
-            icrl.set_expert_data(s_real, a_real, model_confidence=model_conf)
+            if use_trans:
+                icrl.set_expert_data(s_real, a_real, next_obs=s2_real)
+            else:
+                # Confidence mode (v1 style, Type 2 OOD proxy):
+                # model_conf = 1/(1+MSE(corrected_pred, real)) — high where model is accurate
+                ns_real_pred, _ = corrected.predict(s_real, a_real, deterministic=True)
+                model_conf = 1.0 / (1.0 + np.mean((ns_real_pred - s2_real) ** 2, axis=1))
+                icrl.set_expert_data(s_real, a_real, model_confidence=model_conf)
+            # Cross-env transfer: optionally load pretrained φ (frozen)
+            if args.load_phi is not None:
+                log(f"  [TRANSFER] Loading frozen φ from {args.load_phi}")
+                icrl.load(args.load_phi, freeze=True)
 
         obs, _ = env_real.reset(seed=SEED); curve = []
         log(f"\n[Phase 2: {mode} MBPO with SINDy+NAU δ] {TRAIN_STEPS//1000}k steps")
@@ -625,12 +676,26 @@ def main():
                         w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
 
                         if mode == "c10" and icrl is not None:
-                            # ICRL: learned feasibility weight
-                            model_conf = w_qdelta.reshape(-1)  # use QΔ as confidence input
-                            w_icrl = icrl.get_constraint_weight(
-                                start_states, actions, model_confidence=model_conf)
-                            # Combined: QΔ × φ(s,a)
-                            w = w_qdelta * w_icrl
+                            # Compute φ score per rollout (input depends on ICRL mode)
+                            if icrl_mode_used == "transition":
+                                delta_pred = ns_pred - start_states
+                                phi_scores = icrl.get_feasibility(
+                                    start_states, actions, delta_s=delta_pred)
+                            else:
+                                phi_scores = icrl.get_feasibility(
+                                    start_states, actions, model_confidence=w_qdelta)
+                            if args.icrl_combine == "top_k":
+                                # v4: keep top 70% most real-like rollouts
+                                keep_frac = 0.7
+                                n_keep = max(1, int(len(phi_scores) * keep_frac))
+                                top_k_idx = np.argpartition(-phi_scores, n_keep - 1)[:n_keep]
+                                keep_mask = np.zeros(len(phi_scores), dtype=bool)
+                                keep_mask[top_k_idx] = True
+                                w = w_qdelta * keep_mask.astype(np.float32)
+                            else:
+                                # v2/v3 soft modulation: w = QΔ × (0.5 + 0.5×φ)
+                                w_icrl = 0.5 + 0.5 * phi_scores
+                                w = w_qdelta * w_icrl
                         elif mode == "c9" and constraint_sys is not None:
                             # Hardcoded constraint filter
                             ok_mask, _ = constraint_sys.check_batch(
@@ -658,8 +723,8 @@ def main():
                     agent.update(model_buf)
 
             if step % EVAL_INTERVAL == 0:
-                ret, std = evaluate(agent, env_cls)
-                curve.append((step, ret))
+                ret, std, viol = evaluate(agent, env_cls)
+                curve.append((step, ret, viol))
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
@@ -675,18 +740,30 @@ def main():
                     if icrl is not None:
                         ics = icrl.get_stats()
                         diag += f" φ_e={ics.get('phi_expert',0):.2f} φ_n={ics.get('phi_nominal',0):.2f}"
-                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
 
-                # ICRL backward step: update φ(s,a)
-                if icrl is not None and step % EVAL_INTERVAL == 0 and model_buf.size > 100:
-                    nom_idx = np.random.randint(0, model_buf.size, min(2000, model_buf.size))
-                    nom_conf = 1.0 / (1.0 + np.mean(
-                        (corrected.predict(model_buf.s[nom_idx], model_buf.a[nom_idx], True)[0]
-                         - model_buf.s2[nom_idx]) ** 2, axis=1))
+                # ICRL backward step: update φ (mode-dependent)
+                # Skip if φ is frozen (transfer mode with --load_phi)
+                if icrl is not None and not icrl.is_frozen and step % EVAL_INTERVAL == 0 and env_buf.size > 500:
+                    nom_n = min(2000, env_buf.size)
+                    nom_idx = np.random.randint(0, env_buf.size, nom_n)
+                    nom_states = env_buf.s[nom_idx]
+                    nom_actions = env_buf.a[nom_idx]
+                    ns_sim_raw, _ = wm_sim.predict(nom_states, nom_actions, deterministic=True)
+                    if icrl_mode_used == "transition":
+                        # Negatives = raw M_sim Δs (discriminate real dynamics vs sim dynamics)
+                        nominal_extra = ns_sim_raw - nom_states
+                    else:
+                        # Confidence mode: nominal = sim predictions have LOW confidence in real
+                        # conf_sim = 1/(1+MSE(sim_prediction, real_next_state))
+                        nom_real_next = env_buf.s2[nom_idx]
+                        conf_sim = 1.0 / (1.0 + np.mean(
+                            (ns_sim_raw - nom_real_next) ** 2, axis=1))
+                        nominal_extra = conf_sim
                     icrl_metrics = icrl.train_constraint(
-                        model_buf.s[nom_idx], model_buf.a[nom_idx],
-                        nominal_conf=nom_conf, n_iters=10)
+                        nom_states, nom_actions,
+                        nominal_extra=nominal_extra, n_iters=3)
                     log(f"    ICRL update: φ_e={icrl_metrics['phi_expert']:.3f} "
                         f"φ_n={icrl_metrics['phi_nominal']:.3f} "
                         f"sep={icrl_metrics['separation']:.3f} kl={icrl_metrics['kl']:.3f}")
@@ -700,6 +777,11 @@ def main():
                     constraint_sys.audit_suspicious(
                         env_buf.s[idx_audit], env_buf.a[idx_audit],
                         ns_audit, r_audit, corr_mag, step=step)
+
+        # Optional: save trained φ for cross-env transfer
+        if icrl is not None and args.save_phi is not None and not icrl.is_frozen:
+            icrl.save(args.save_phi)
+            log(f"  [SAVE] ICRL φ saved to {args.save_phi}")
 
         env_real.close()
 
@@ -835,8 +917,8 @@ def main():
                     agent.update(model_buf)
 
             if step % EVAL_INTERVAL == 0:
-                ret, std = evaluate(agent, env_cls)
-                curve.append((step, ret))
+                ret, std, viol = evaluate(agent, env_cls)
+                curve.append((step, ret, viol))
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
@@ -844,12 +926,14 @@ def main():
                         env_buf.s[idx], env_buf.a[idx], deterministic=True)
                     s_err = np.sqrt(np.mean((ns_test - env_buf.s2[idx]) ** 2))
                     diag = f"  m_s={s_err:.3f} paired={len(paired_s)}"
-                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f}  "
+                log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
         env.close()
 
     # Summary
-    avg = np.mean([r for _, r in curve[-3:]])
+    avg = np.mean([r for _, r, *_ in curve[-3:]])
+    avg_v = np.mean([v for _, _, v, *_ in curve[-3:]]) if curve and len(curve[0]) >= 3 else 0.0
+    log(f"{mode} last 3 avg: violations={avg_v:.2f}/ep")
     log(f"\n{'='*50}")
     log(f"{mode} last 3 avg: real={avg:.1f}")
     log(f"{'='*50}")

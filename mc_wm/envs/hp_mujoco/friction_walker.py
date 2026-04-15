@@ -52,3 +52,29 @@ class FrictionWalkerEnv(gym.Env):
 
     def close(self):
         self._env.close()
+
+
+class FrictionWalkerSoftCeilingEnv(FrictionWalkerEnv):
+    """
+    FrictionWalker + soft ceiling z > 1.25 for cross-env transfer tests.
+
+    Walker2d's z_root ~1.20 standing, ~1.27 when moving. Ceiling at 1.25
+    binds often (agent must stay low), with continuous penalty 10*(z-1.25)².
+
+    Paired with gravity_ceiling source for ICRL transfer experiments:
+      source: GravityCheetah z>0.2 (Cheetah z ~0 baseline, offset +0.2)
+      target: FrictionWalker z>1.25 (Walker z ~1.2 baseline, offset +0.05)
+    Shared "stay low" semantic; different absolute thresholds + dynamics gap.
+    """
+
+    Z_CEILING = 1.25  # Walker normal z ≈ 1.20; ceiling at 1.25 = "stay low"
+    PENALTY_SCALE = 10.0
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self._env.step(action)
+        z = float(obs[0])
+        excess = max(0.0, z - self.Z_CEILING)
+        if excess > 0:
+            reward -= self.PENALTY_SCALE * excess * excess
+            info["ceiling_hit"] = True
+        return obs, reward, terminated, truncated, info
