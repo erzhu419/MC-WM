@@ -71,19 +71,26 @@ class HPOrchestrator:
         initial_hp: dict,
         hp_schema: Optional[dict] = None,
         log_fn=None,
+        max_float_step_frac: float = 0.10,   # hard cap on single-change magnitude
+        cooldown_steps: int = 2,              # evals to wait after each applied change
     ) -> None:
         self._oracle = oracle
         self._env_desc = env_description
         self._schema = hp_schema or DEFAULT_HP_SCHEMA
-        # Restrict current_hp to keys present in schema.
         self._current_hp = {k: v for k, v in initial_hp.items() if k in self._schema}
         self._log = log_fn or (lambda msg: print(msg, flush=True))
-        self._trial_history: list[dict] = []   # completed trials
-        self._propose_history: list[dict] = [] # every LLM call's proposal
+        self._trial_history: list[dict] = []
+        self._propose_history: list[dict] = []
         self.n_proposals = 0
         self.n_applied = 0
         self.n_clamped = 0
         self.n_rejected = 0
+        self.n_skipped_cooldown = 0
+        self.n_hard_clamped = 0
+        self._max_float_step = float(max_float_step_frac)
+        self._cooldown = int(cooldown_steps)
+        self._last_change_eval_idx = -10**9  # allow first call immediately
+        self._eval_idx = 0
 
     # ──────────────────────────────────────────────────────────────────
     # Validation
@@ -119,12 +126,17 @@ class HPOrchestrator:
 
     def propose(self, training_metrics: dict) -> dict:
         """
-        Ask the LLM for the next HP configuration.  Returns a dict of
-        validated HPs to APPLY (only keys that differ from current_hp AND
-        pass validation).  Empty dict means "no change".
+        Ask the LLM for the next HP configuration.  Returns validated HP
+        dict to APPLY.  Honors cooldown + hard step-size clamp.
         """
+        self._eval_idx += 1
+        # Cooldown: skip if too soon after last applied change.
+        if self._eval_idx - self._last_change_eval_idx < self._cooldown:
+            self.n_skipped_cooldown += 1
+            self._log(f"  [LLM Role #5] cooldown ({self._cooldown - (self._eval_idx - self._last_change_eval_idx)} "
+                      f"evals remaining); skip propose")
+            return {}
         self.n_proposals += 1
-        # Build a trimmed history for the prompt (last 8 trials).
         trial_sub = self._trial_history[-8:]
         response = self._oracle.role5_tune_hyperparameters(
             env_description=self._env_desc,
@@ -148,7 +160,21 @@ class HPOrchestrator:
                 continue
             if note:
                 self.n_clamped += 1
-                self._log(f"    ~ Role #5 clamp {k}: {note}")
+                self._log(f"    ~ Role #5 schema-clamp {k}: {note}")
+            # Hard step-size clamp for float HPs: |Δ/current| ≤ max_float_step
+            cur = self._current_hp.get(k)
+            if (isinstance(cur, (int, float)) and not isinstance(cur, bool)
+                    and self._schema[k].get("type") == "float"
+                    and isinstance(val, (int, float))
+                    and abs(cur) > 1e-8):
+                max_delta = abs(cur) * self._max_float_step
+                delta = val - cur
+                if abs(delta) > max_delta:
+                    new_val = cur + (max_delta if delta > 0 else -max_delta)
+                    self.n_hard_clamped += 1
+                    self._log(f"    ~ Role #5 step-clamp {k}: {val}→{new_val:.4f}  "
+                              f"(|Δ|={abs(delta):.3f} > cap={max_delta:.3f})")
+                    val = new_val
             if val != self._current_hp.get(k):
                 clean[k] = val
         self._propose_history.append({
@@ -158,6 +184,7 @@ class HPOrchestrator:
         })
         if clean:
             self.n_applied += 1
+            self._last_change_eval_idx = self._eval_idx  # start cooldown
             self._log(f"  [LLM Role #5] apply {len(clean)} HP changes:")
             for k, v in clean.items():
                 old = self._current_hp.get(k)
@@ -198,6 +225,8 @@ class HPOrchestrator:
             "n_applied": self.n_applied,
             "n_clamped": self.n_clamped,
             "n_rejected": self.n_rejected,
+            "n_skipped_cooldown": self.n_skipped_cooldown,
+            "n_hard_clamped": self.n_hard_clamped,
             "n_trials_recorded": len(self._trial_history),
             "final_hp": dict(self._current_hp),
         }
@@ -208,7 +237,9 @@ class HPOrchestrator:
         self._log("┌─ [LLM Role #5 Summary] ───────────────────")
         self._log(f"│ proposals requested : {s['n_proposals']}")
         self._log(f"│ changes applied     : {s['n_applied']}")
-        self._log(f"│ values clamped      : {s['n_clamped']}")
+        self._log(f"│ schema clamps       : {s['n_clamped']}")
+        self._log(f"│ step-size clamps    : {s['n_hard_clamped']}")
+        self._log(f"│ cooldown skips      : {s['n_skipped_cooldown']}")
         self._log(f"│ values rejected     : {s['n_rejected']}")
         self._log(f"│ trials recorded     : {s['n_trials_recorded']}")
         self._log(f"│ final HP            : {json.dumps(s['final_hp'])[:80]}")

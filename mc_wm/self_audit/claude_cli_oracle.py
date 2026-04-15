@@ -609,21 +609,33 @@ No prose outside the JSON block.
                        f"recent_reward={[round(r,1) for r in rt[-5:]]}")
         prompt = f"""You are a runtime safety auditor for an MBRL system.
 
-FRAMEWORK — Two OOD types:
-  Type 1 OOD ("extrapolation, learnable pattern"):
-    Example: correction is large because the model hasn't seen enough
-    data in this regime, but the dynamics are valid.  Solution: add
-    a feature to the residual model (NOT your job).
-  Type 2 OOD ("infeasible region, shared forbidden zone"):
-    Example: state violates physics (z < 0, |angle| > π).  Symptom:
-    correction is large AND the state itself is impossible.  A
-    constraint should prevent policy from visiting here.
-    YOUR JOB.
+FRAMEWORK — Three kinds of "suspicious transition":
+  (A) Type 2 OOD — infeasible state (shared forbidden zone):
+      Example: z < 0, |angle| > π, vz changing by 20m/s in one step.
+      The STATE itself is physically impossible.
+      ACTION: propose a new constraint (YOUR JOB).
 
-If the suspicious transitions below are Type 1 (large correction but
-states are physically plausible), set verdict="valid_large_correction"
-and leave new_constraint=null.  Only propose a new constraint when the
-state itself violates shared physics.
+  (B) Type 1 OOD — large correction but plausible state:
+      Example: the model hasn't seen this regime enough, correction is
+      large but state values are all in physical range.
+      ACTION: verdict="valid_large_correction", NO new constraint —
+      this is the residual model's job to learn.
+
+  (C) "Measurement artifact" — correction looks large ONLY because the
+      QΔ weight distribution collapsed (very low mean/max weights) or
+      because the eval episode terminated with reward=0 (ceiling hit).
+      The transition itself may be fine; the "suspicious" label came
+      from a metric degradation, not a real physics issue.
+      ACTION: verdict="valid_large_correction" + explain in reasoning
+      that this is a measurement artifact, NOT a new constraint.
+      Common signal: training_metrics shows reward dropping AND QΔ
+      weight std collapsing — flag these as (C), not (A).
+
+Only propose a new constraint when you are confident the state itself
+violates physics (case A), not when the suspiciousness comes from
+(B) or (C).  Prior decision_history should inform your judgment:
+if you recently added a constraint that got pruned, do NOT add a
+similar one back.
 
 TRAIN STEP: {step}
 {tm_line}

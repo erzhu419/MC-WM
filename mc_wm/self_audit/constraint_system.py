@@ -426,10 +426,13 @@ class ConstraintSystem:
         self._violation_trend = self._violation_trend[-20:]
 
     def update_training_metrics(self, reward: float = None, buffer_size: int = None,
-                                  policy_entropy: float = None) -> None:
+                                  policy_entropy: float = None,
+                                  qdelta_weight_stats: dict = None) -> None:
         """
         External hook: feed in current training-state metrics for LLM context.
         Called from training loop each eval.
+        qdelta_weight_stats: {"min": ..., "mean": ..., "max": ..., "std": ...}
+        — lets Role #3 detect "measurement artifact" when QΔ collapses.
         """
         if reward is not None:
             self._training_metrics["reward_trend"].append(float(reward))
@@ -438,6 +441,11 @@ class ConstraintSystem:
             self._training_metrics["buffer_size"] = int(buffer_size)
         if policy_entropy is not None:
             self._training_metrics["policy_entropy"] = float(policy_entropy)
+        if qdelta_weight_stats is not None:
+            self._training_metrics.setdefault("qdelta_weight_history", [])
+            self._training_metrics["qdelta_weight_history"].append(dict(qdelta_weight_stats))
+            self._training_metrics["qdelta_weight_history"] = \
+                self._training_metrics["qdelta_weight_history"][-10:]
 
     def _recent_history_summary(self, max_entries: int = 10) -> list[dict]:
         """Summarise last N decisions (newest first) for LLM feedback prompts."""

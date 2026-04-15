@@ -240,6 +240,9 @@ def main():
                              "rollout_batch, etc. at each eval interval.")
     parser.add_argument("--role5_every_n_evals", type=int, default=2,
                         help="Call Role #5 every N eval intervals (default 2 = 10k steps)")
+    parser.add_argument("--enable_icrl", action="store_true",
+                        help="Enable ICRL φ even in c9 (stacked with ConstraintSystem + "
+                             "Bellman QΔ). Turns c9 into a superset-of-c10 config.")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -765,7 +768,12 @@ def main():
         #   confidence (v1): φ(s,a,model_conf) — flags low-confidence regions (Type 2 proxy)
         icrl = None
         icrl_mode_used = args.icrl_mode
-        if mode == "c10":
+        # ICRL enabled if: mode==c10 (legacy) OR --enable_icrl flag explicit.
+        # Under QΔ↔ICRL rank-equivalence theorem (ResidualMDP.lean §VIII),
+        # c9 with Bellman QΔ alone already subsumes ICRL's signal when the
+        # residual is uniformly fit.  So c9 defaults to NO ICRL.
+        _icrl_wanted = (mode == "c10") or args.enable_icrl
+        if _icrl_wanted:
             log(f"\n[ICRL] Initializing ICRL (mode={icrl_mode_used})...")
             use_trans = (icrl_mode_used == "transition")
             icrl = ResidualAwareICRL(
@@ -857,8 +865,10 @@ def main():
                             tau_s = float(np.median(per_s_err)) + 1e-8
                             w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
 
-                        if mode == "c10" and icrl is not None:
-                            # Compute φ score per rollout (input depends on ICRL mode)
+                        # Stacked filters: each module contributes independently.
+                        # Final weight = w_qdelta × w_icrl × constraint_mask.
+                        w = w_qdelta.copy()
+                        if icrl is not None:
                             if icrl_mode_used == "transition":
                                 delta_pred = ns_pred - start_states
                                 phi_scores = icrl.get_feasibility(
@@ -867,24 +877,19 @@ def main():
                                 phi_scores = icrl.get_feasibility(
                                     start_states, actions, model_confidence=w_qdelta)
                             if runtime_cfg["icrl_combine"] == "top_k":
-                                # Keep top-K fraction most real-like rollouts
                                 keep_frac = runtime_cfg["icrl_top_k_frac"]
                                 n_keep = max(1, int(len(phi_scores) * keep_frac))
                                 top_k_idx = np.argpartition(-phi_scores, n_keep - 1)[:n_keep]
                                 keep_mask = np.zeros(len(phi_scores), dtype=bool)
                                 keep_mask[top_k_idx] = True
-                                w = w_qdelta * keep_mask.astype(np.float32)
+                                w = w * keep_mask.astype(np.float32)
                             else:
-                                # v2/v3 soft modulation: w = QΔ × (0.5 + 0.5×φ)
                                 w_icrl = 0.5 + 0.5 * phi_scores
-                                w = w_qdelta * w_icrl
-                        elif mode == "c9" and constraint_sys is not None:
-                            # Hardcoded constraint filter
+                                w = w * w_icrl
+                        if constraint_sys is not None:
                             ok_mask, _ = constraint_sys.check_batch(
                                 start_states, actions, ns_pred, r_pred * w_qdelta)
-                            w = w_qdelta * ok_mask.astype(np.float32)
-                        else:
-                            w = w_qdelta
+                            w = w * ok_mask.astype(np.float32)
 
                         r_weighted = r_pred * w
                         # Filter zero-weight transitions
@@ -907,15 +912,26 @@ def main():
             if step % EVAL_INTERVAL == 0:
                 ret, std, viol = evaluate(agent, env_cls)
                 curve.append((step, ret, viol))
-                # Feed violation trend + training state to constraint_sys so
-                # LLM Role #3/#4 prompts include reward/buffer context and
-                # Role #4 can see whether violations are trending to zero.
+                # Feed violation trend + training state + QΔ weight distribution
+                # to constraint_sys so Role #3 can tell "measurement artifact"
+                # from true Type 2 OOD.
                 if constraint_sys is not None:
                     if hasattr(constraint_sys, "update_violation_trend"):
                         constraint_sys.update_violation_trend(viol)
                     if hasattr(constraint_sys, "update_training_metrics"):
+                        qd_stats = None
+                        if qdelta_bellman is not None and env_buf.size >= 500:
+                            _ws = qdelta_bellman.weight_np(
+                                env_buf.s[:500], env_buf.a[:500])
+                            qd_stats = {
+                                "min": float(_ws.min()),
+                                "mean": float(_ws.mean()),
+                                "max": float(_ws.max()),
+                                "std": float(_ws.std()),
+                            }
                         constraint_sys.update_training_metrics(
-                            reward=ret, buffer_size=env_buf.size)
+                            reward=ret, buffer_size=env_buf.size,
+                            qdelta_weight_stats=qd_stats)
                 diag = ""
                 if env_buf.size >= 500:
                     idx = np.random.randint(max(0, env_buf.size-2000), env_buf.size, 500)
