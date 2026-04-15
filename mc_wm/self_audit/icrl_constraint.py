@@ -28,6 +28,39 @@ import torch.nn as nn
 import torch.optim as optim
 
 
+class KANFeasibilityNet(nn.Module):
+    """
+    KAN-based φ(s, a, extra) ∈ [0,1] — replaces MLP for ICRL discriminator.
+
+    Why KAN here: feasibility boundaries often have non-trivial structure
+    (e.g., φ depends on z² or sin(angle)). KAN's spline edges discover
+    this without manual feature engineering.
+    """
+
+    def __init__(self, obs_dim, act_dim, hidden_sizes=(32,),
+                 use_transition=True, grid_size=8, spline_order=3):
+        super().__init__()
+        from efficient_kan import KAN as _KAN
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+        self.use_transition = use_transition
+
+        if use_transition:
+            input_dim = obs_dim + act_dim + obs_dim
+        else:
+            input_dim = obs_dim + act_dim + 1
+
+        self.kan = _KAN(
+            layers_hidden=[input_dim] + list(hidden_sizes) + [1],
+            grid_size=grid_size,
+            spline_order=spline_order,
+        )
+
+    def forward(self, obs, acs, extra):
+        x = torch.cat([obs, acs, extra], dim=-1)
+        return torch.sigmoid(self.kan(x))
+
+
 class FeasibilityNet(nn.Module):
     """
     φ(s, a, Δs) ∈ [0,1]: probability that transition (s,a)→s' is from real dynamics.
@@ -83,7 +116,8 @@ class ResidualAwareICRL:
 
     def __init__(self, obs_dim, act_dim, hidden_sizes=(128, 128),
                  lr=3e-4, reg_coeff=0.05, use_transition=True,
-                 target_kl=10.0, device="cpu", log_fn=None):
+                 target_kl=10.0, device="cpu", log_fn=None,
+                 use_kan=False):
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.device = device
@@ -91,11 +125,18 @@ class ResidualAwareICRL:
         self.reg_coeff = reg_coeff
         self.target_kl = target_kl
         self.use_transition = use_transition
+        self.use_kan = use_kan
 
-        self.phi_net = FeasibilityNet(
-            obs_dim, act_dim, hidden_sizes,
-            use_transition=use_transition,
-        ).to(device)
+        if use_kan:
+            self.phi_net = KANFeasibilityNet(
+                obs_dim, act_dim, hidden_sizes=(32,),
+                use_transition=use_transition,
+            ).to(device)
+        else:
+            self.phi_net = FeasibilityNet(
+                obs_dim, act_dim, hidden_sizes,
+                use_transition=use_transition,
+            ).to(device)
         self.optimizer = optim.Adam(self.phi_net.parameters(), lr=lr, weight_decay=1e-5)
 
         # Expert data (real transitions)

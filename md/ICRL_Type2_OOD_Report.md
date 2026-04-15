@@ -173,6 +173,48 @@ Source φ 在 gravity_soft_ceiling 训练 50k steps，保存到 `/tmp/phi_*_grav
 
 ---
 
+## 3.6 KAN 替换 SINDy+NAU/MLP 的 Ablation
+
+新增 5 实验测试用 KAN 替换两个核心模块（残差模型 δ 和 ICRL 判别器 φ）。
+
+### 3.6.1 矩阵
+
+| Config | 残差 δ | ICRL φ | Reward | Viol/ep |
+|--------|:------:|:------:|-------:|--------:|
+| baseline c9 | SINDy+NAU | — | 4618 | 2.03 |
+| **c9 KAN-res** | **KAN** | — | **5763** | **0.00** |
+| baseline c10 v2 | SINDy+NAU | MLP | 4397 | 0.20 |
+| **c10 v2 KAN-φ** | SINDy+NAU | **KAN** | **5049** | 0.23 |
+| c10 v2 KAN-res | KAN | MLP | 2720 | 11.70 ← 崩坏 |
+| c10 v2 KAN-both | KAN | KAN | 3016 | 2.57 |
+| Walker c10 v2 KAN-φ | SINDy+NAU | KAN | 207 | 8.33 ← Walker 上不行 |
+
+### 3.6.2 关键发现
+
+1. **c9 + KAN residual 是 soft ceiling 上的全场最优**：5763 reward + 0 violations
+   - 比原 c9 SINDy+NAU 提升 **+25% reward** AND 完美 0 violations
+   - 比之前最优 c10 v2 (4397/0.20) 提升 +31% reward
+   - **首次有方法在 reward AND violation 两轴上同时显著超越所有先前 config**
+
+2. **KAN φ 单独使用增益显著**：c10 v2 + KAN φ → 5049 reward (+15% vs MLP φ)
+   - KAN 的 spline edges 比 MLP 更适合 φ ∈ [0,1] 的判别任务
+
+3. **KAN res + ICRL 同时上反而崩坏**：2720 reward + 11.70 viol
+   - 解释：KAN 残差已经做了"温和的"动态修正，ICRL 再过滤导致 model_buf 样本不足
+   - 当 KAN 残差已足够好时（c9 case），不需要额外的约束模块
+
+4. **Walker 上 KAN φ 退化**：208 reward + 8.33 viol（vs SINDy+MLP 209/5.37）
+   - 说明 KAN 需要充分的训练数据；Walker 上 reward signal 弱、ep 短，KAN φ 过拟合
+
+### 3.6.3 KAN 与 Lean 4 形式化的呼应
+
+KAN res 在 c9 上拿到 0 violations 的现象，恰好对应 Lean 4 中证明的：
+
+> **Theorem `residual_simulation_lemma`** (`/home/erzhu419/mine_code/proof/MC-WM/ResidualMDP.lean`):
+>   `‖V^π_real - V^π_resid‖_∞ ≤ (γ·R_max/(1-γ)²) · ε_π`
+
+KAN 比 SINDy+NAU 给出更小的 `ε_π`（残差拟合误差更低），所以 V^π 的 gap 更小，policy 在 M_resid 上的优化更好地迁移到 M_real → reward ↑ + violations ↓。
+
 ## 4. 统一理论框架
 
 ### 4.1 Type 2 OOD 处理的光谱

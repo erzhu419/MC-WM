@@ -28,6 +28,7 @@ from mc_wm.envs.hp_mujoco.friction_walker import FrictionWalkerSoftCeilingEnv
 from mc_wm.policy.resac_agent import RESACAgent
 from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, CorrectedWorldModel
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
+from mc_wm.residual.kan_adapter import KANResidualAdapter
 from mc_wm.self_audit.constraint_system import ConstraintSystem
 from mc_wm.self_audit.icrl_constraint import ResidualAwareICRL
 
@@ -167,6 +168,10 @@ def main():
     parser.add_argument("--load_phi", default=None, help="Path to load ICRL φ (freezes it)")
     parser.add_argument("--icrl_combine", default="top_k", choices=["top_k", "soft"],
                         help="v4 default=top_k (filter top 70%); v2/v3=soft (w=QΔ×(0.5+0.5×φ))")
+    parser.add_argument("--use_kan_residual", action="store_true",
+                        help="Replace SINDy+NAU with KAN for residual δ")
+    parser.add_argument("--use_kan_phi", action="store_true",
+                        help="Replace MLP with KAN inside ICRL FeasibilityNet")
     args = parser.parse_args()
     mode = args.mode
 
@@ -175,6 +180,10 @@ def main():
         _suffix += "_soft"
     if mode == "c10" and args.load_phi is not None:
         _suffix += "_transfer"
+    if args.use_kan_residual:
+        _suffix += "_kanRes"
+    if args.use_kan_phi:
+        _suffix += "_kanPhi"
     log_path = f"/tmp/step2_{mode}_{args.env}{_suffix}.log"
     def log(msg=""):
         print(msg, flush=True)
@@ -566,11 +575,15 @@ def main():
 
         ns_sim_pred, r_sim_pred = wm_sim.predict(s_real, a_real, deterministic=True)
 
-        log(f"  Training SINDy+NAU residual δ...")
-        _env_type = "gravity_cheetah" if mode == "c8" else None
-        _max_rounds = 3  # hypothesis loop discovers features, then locks sparsity for SGD refit
-        residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
-                                    env_type=_env_type, max_rounds=_max_rounds)
+        if args.use_kan_residual:
+            log(f"  Training KAN residual δ (replaces SINDy+NAU)...")
+            residual = KANResidualAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log)
+        else:
+            log(f"  Training SINDy+NAU residual δ...")
+            _env_type = "gravity_cheetah" if mode == "c8" else None
+            _max_rounds = 3
+            residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
+                                        env_type=_env_type, max_rounds=_max_rounds)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20)
 
@@ -620,7 +633,8 @@ def main():
             icrl = ResidualAwareICRL(
                 obs_dim, act_dim, hidden_sizes=(128, 128),
                 lr=3e-4, reg_coeff=0.05, use_transition=use_trans,
-                target_kl=10.0, device=DEVICE, log_fn=log)
+                target_kl=10.0, device=DEVICE, log_fn=log,
+                use_kan=args.use_kan_phi)
             if use_trans:
                 icrl.set_expert_data(s_real, a_real, next_obs=s2_real)
             else:
