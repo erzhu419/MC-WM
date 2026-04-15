@@ -31,6 +31,7 @@ from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, Corr
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
 from mc_wm.residual.kan_adapter import KANResidualAdapter
 from mc_wm.self_audit.claude_cli_oracle import ClaudeCLIOracle
+from mc_wm.self_audit.hp_orchestrator import HPOrchestrator
 from mc_wm.self_audit.constraint_system import ConstraintSystem
 from mc_wm.self_audit.icrl_constraint import ResidualAwareICRL
 
@@ -182,6 +183,12 @@ def main():
                         help="Enable Claude CLI oracle (Role #2 feature hypotheses) "
                              "during SINDy+NAU self-hypothesis loop. Requires `claude` "
                              "CLI on PATH (subscription plan, no API key).")
+    parser.add_argument("--use_role5_hp", action="store_true",
+                        help="Enable LLM Role #5 meta-hyperparameter orchestrator "
+                             "(requires --use_claude_llm).  LLM tunes qdelta_gamma, "
+                             "rollout_batch, etc. at each eval interval.")
+    parser.add_argument("--role5_every_n_evals", type=int, default=2,
+                        help="Call Role #5 every N eval intervals (default 2 = 10k steps)")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -576,6 +583,21 @@ def main():
         # Tests: interpretable symbolic residual vs black-box MLP
         np.random.seed(SEED); torch.manual_seed(SEED)
 
+        # Runtime HP config — mutable at training-time by LLM Role #5.
+        # Initialised from CLI defaults; may be updated by HPOrchestrator
+        # at each eval interval.  Rollout/refit code below reads from this
+        # dict instead of module globals.
+        runtime_cfg = {
+            "rollout_batch": ROLLOUT_BATCH,
+            "rollout_freq": ROLLOUT_FREQ,
+            "model_train_freq": MODEL_TRAIN_FREQ,
+            "qdelta_gamma": args.qdelta_gamma,
+            "audit_percentile": 95,
+            "max_hypothesis_rounds": 3,
+            "icrl_combine": args.icrl_combine,
+            "icrl_top_k_frac": 0.7,
+        }
+
         # Phase 1a: M_sim
         log(f"\n[Phase 1a] Collecting {N_SIM_PRETRAIN//1000}k SIM transitions + training M_sim...")
         s_sim, a_sim, r_sim, s2_sim, d_sim, ep_sim = collect_transitions(
@@ -607,6 +629,18 @@ def main():
             elif args.env == "ant_wall_broken":
                 _env_desc = ("Ant-v4; real has action[4:]=0 (back legs broken) and wall x<-3.")
             log(f"  [LLM] Claude oracle enabled: model={args.claude_model}")
+
+        # Role #5: Meta-HP orchestrator (optional).
+        hp_orch = None
+        if args.use_claude_llm and args.use_role5_hp:
+            hp_orch = HPOrchestrator(
+                oracle=_claude,
+                env_description=_env_desc,
+                initial_hp=dict(runtime_cfg),
+                log_fn=log,
+            )
+            log(f"  [LLM] Role #5 HP orchestrator enabled, calls every "
+                f"{args.role5_every_n_evals} evals")
 
         if args.use_kan_residual:
             log(f"  Training KAN residual δ (replaces SINDy+NAU)...")
@@ -712,7 +746,7 @@ def main():
             if d_flag or tr: obs, _ = env_real.reset()
 
             # Online refit: retrain SINDy+NAU δ (warm-start)
-            if step > WARMUP and step % MODEL_TRAIN_FREQ == 0:
+            if step > WARMUP and step % runtime_cfg["model_train_freq"] == 0:
                 n_fit = min(env_buf.size, 50000)
                 idx_fit = np.random.choice(env_buf.size, n_fit, replace=False) if env_buf.size > n_fit else np.arange(env_buf.size)
                 ns_sim_p, r_sim_p = wm_sim.predict(
@@ -751,9 +785,10 @@ def main():
                         f"τ={qd_metrics['tau']:.3f} qd_mean={qd_metrics['qd_mean']:.3f}")
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
-                if step % ROLLOUT_FREQ == 0:
+                if step % runtime_cfg["rollout_freq"] == 0:
+                    _rb = runtime_cfg["rollout_batch"]
                     # Sample start states from env_buf (with their real next-states)
-                    s_idx = np.random.randint(0, env_buf.size, ROLLOUT_BATCH)
+                    s_idx = np.random.randint(0, env_buf.size, _rb)
                     start_states = env_buf.s[s_idx]
                     actions = np.array([agent.get_action(ss, deterministic=False)
                                        for ss in start_states])
@@ -780,9 +815,9 @@ def main():
                             else:
                                 phi_scores = icrl.get_feasibility(
                                     start_states, actions, model_confidence=w_qdelta)
-                            if args.icrl_combine == "top_k":
-                                # v4: keep top 70% most real-like rollouts
-                                keep_frac = 0.7
+                            if runtime_cfg["icrl_combine"] == "top_k":
+                                # Keep top-K fraction most real-like rollouts
+                                keep_frac = runtime_cfg["icrl_top_k_frac"]
                                 n_keep = max(1, int(len(phi_scores) * keep_frac))
                                 top_k_idx = np.argpartition(-phi_scores, n_keep - 1)[:n_keep]
                                 keep_mask = np.zeros(len(phi_scores), dtype=bool)
@@ -812,7 +847,7 @@ def main():
                         model_buf.add_batch(
                             start_states, actions,
                             r_pred.reshape(-1, 1), ns_pred,
-                            np.zeros((ROLLOUT_BATCH, 1), np.float32))
+                            np.zeros((_rb, 1), np.float32))
 
                 agent.update(env_buf)
                 if model_buf.size >= BATCH_SIZE:
@@ -852,6 +887,30 @@ def main():
                                  f"{_w_diag.mean():.2f},{_w_diag.max():.2f}]")
                 log(f"  step {step:>6d} | real={ret:7.1f}±{std:4.0f} viol={viol:4.1f}  "
                     f"env={env_buf.size} mdl={model_buf.size}{diag}")
+
+                # Role #5: meta-hyperparameter orchestration (optional, non-blocking).
+                # Called every N evals; LLM proposes next HP config, validated
+                # against schema, applied to runtime_cfg in-place.
+                if (hp_orch is not None and
+                    (step // EVAL_INTERVAL) % max(1, args.role5_every_n_evals) == 0 and
+                    step > EVAL_INTERVAL * 2):  # give training a warm-up
+                    # Assemble training metrics snapshot.
+                    tm = {
+                        "reward_trend": [r for _, r, *_ in curve[-5:]],
+                        "violation_trend": [v for _, _, v, *_ in curve[-5:]] if curve and len(curve[0]) >= 3 else [],
+                        "val_mse": None,   # filled from residual diag if available
+                        "buffer_size": env_buf.size,
+                    }
+                    try:
+                        ns_tmp, _ = corrected.predict(
+                            env_buf.s[:500], env_buf.a[:500], deterministic=True)
+                        tm["val_mse"] = float(np.mean((ns_tmp - env_buf.s2[:500]) ** 2))
+                    except Exception:
+                        pass
+                    applied = hp_orch.propose(tm)
+                    # Hot-update: tweak qdelta_bellman's γ if it was changed.
+                    if "qdelta_gamma" in applied and qdelta_bellman is not None:
+                        qdelta_bellman.gamma = float(applied["qdelta_gamma"])
 
                 # ICRL backward step: update φ (mode-dependent)
                 # Skip if φ is frozen (transfer mode with --load_phi)
@@ -903,6 +962,19 @@ def main():
             if hasattr(constraint_sys, "finalize_async_llm"):
                 constraint_sys.finalize_async_llm(timeout=10.0)
             constraint_sys.log_llm_summary()
+        if hp_orch is not None:
+            # Record this training run as one completed trial.
+            last_reward = curve[-1][1] if curve else 0.0
+            last_viol = curve[-1][2] if (curve and len(curve[0]) >= 3) else 0.0
+            try:
+                ns_tmp, _ = corrected.predict(env_buf.s[:500], env_buf.a[:500], deterministic=True)
+                last_mse = float(np.mean((ns_tmp - env_buf.s2[:500]) ** 2))
+            except Exception:
+                last_mse = 0.0
+            hp_orch.record_trial_outcome(
+                hp_used=dict(runtime_cfg), reward=last_reward, viol=last_viol,
+                val_mse=last_mse, step=TRAIN_STEPS)
+            hp_orch.log_summary()
         if qdelta_bellman is not None:
             # Final QΔ weight distribution on a sample of env_buf for diagnosis.
             n_diag = min(1000, env_buf.size)

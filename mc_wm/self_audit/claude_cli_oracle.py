@@ -653,6 +653,91 @@ No prose outside the JSON block.
         return {}
 
 
+    # ──────────────────────────────────────────────────────────────────
+    # Role #5 — Meta-hyperparameter orchestrator (LLM-as-BO)
+    # ──────────────────────────────────────────────────────────────────
+
+    def role5_tune_hyperparameters(
+        self,
+        env_description: str,
+        current_hp: dict,
+        hp_schema: dict,
+        trial_history: list[dict],
+        training_metrics: dict,
+    ) -> dict:
+        """
+        LLM acts as a Bayesian-optimization-style meta-optimizer over the
+        hyperparameter space defined by `hp_schema`.
+
+        `current_hp`: current HP values, e.g. {"qdelta_gamma": 0.5, ...}
+        `hp_schema`: {"qdelta_gamma": {"type": "float", "range": [0.0, 0.95]},
+                       "icrl_combine": {"type": "enum", "choices": ["top_k","soft"]}}
+        `trial_history`: [{"hp": {...}, "reward": 5388, "viol": 0.03,
+                            "val_mse": 0.42, "step": 50000}, ...]
+        `training_metrics`: {"reward_trend": [...], "violation_trend": [...],
+                              "buffer_size": N, "val_mse": ...}
+
+        Returns: dict of proposed HP values to adopt for the next training
+        phase.  ALL values MUST be within the schema's legal range.  LLM is
+        encouraged to stay close to current_hp unless trial_history gives
+        strong evidence to move.  Returns empty dict on failure.
+        """
+        prompt = f"""You are a Bayesian-optimization meta-agent for an MBRL training pipeline.
+
+FRAMEWORK — You are the outer-loop optimizer over hyperparameters.  Your
+job is to pick the next hyperparameter configuration to try, given past
+trials and current training state.  Think of yourself as the acquisition
+function in BO — you balance exploration (try unexplored regions) and
+exploitation (stay near known-good configurations).
+
+ENVIRONMENT:
+{env_description}
+
+CURRENT HYPERPARAMETERS:
+{json.dumps(current_hp, indent=2)}
+
+LEGAL HP SCHEMA (range / enum choices):
+{json.dumps(hp_schema, indent=2)}
+
+TRIAL HISTORY (past HPs and their final performance, newest last):
+{json.dumps(trial_history[-8:], indent=2)}
+
+CURRENT TRAINING STATE:
+  reward_trend (last 5):   {training_metrics.get('reward_trend', [])[-5:]}
+  violation_trend (last 5): {training_metrics.get('violation_trend', [])[-5:]}
+  val_mse:                 {training_metrics.get('val_mse', 'unknown')}
+  buffer_size:             {training_metrics.get('buffer_size', 'unknown')}
+
+TASK: Propose the NEXT HP values.  Rules:
+  1. ALL values MUST be within the schema's range or choices.
+  2. Change AT MOST 3 hyperparameters at a time (BO convention —
+     one-at-a-time perturbation gives clean attribution).
+  3. Justify each change with a reason tied to observed data.
+  4. If current HPs are already near-optimal (reward plateau AND
+     violations low), return {{}} (empty) — no change.
+  5. BE CONSERVATIVE: prefer small moves (<=20% change for floats)
+     unless trial_history shows current region is bad.
+
+Respond with ONE json block:
+```json
+{{
+  "proposed_hp": {{"qdelta_gamma": 0.7, "rollout_batch": 500}},
+  "reasons": {{
+    "qdelta_gamma": "reward plateaued at γ=0.5; try deeper Bellman horizon",
+    "rollout_batch": "model MSE stable, can reduce compute by larger batches"
+  }},
+  "expected_reward_direction": "+",
+  "expected_viol_direction": "0"
+}}
+```
+No prose outside the JSON block.
+"""
+        parsed = self.ask(prompt)
+        if isinstance(parsed, dict) and isinstance(parsed.get("proposed_hp"), dict):
+            return parsed
+        return {}
+
+
 _default_oracle: Optional[ClaudeCLIOracle] = None
 
 
