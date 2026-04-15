@@ -118,6 +118,9 @@ class SINDyNAUAdapter:
         # outcome.  Fed back to future Role #2 calls so LLM sees how its past
         # proposals actually performed.
         self._llm_feat_history: list[dict] = []
+        # Name → expression for LLM-added features, used by `_build_full_theta`
+        # to re-evaluate on new (s, a) points at predict time.
+        self._llm_feat_exprs: dict = {}
 
     def _eval_llm_features(self, SA, llm_feats):
         """
@@ -159,14 +162,17 @@ class SINDyNAUAdapter:
                     continue
                 std = col.std() + 1e-8
                 cols.append(col / std)
-                names.append(f"llm_{name}")
+                feat_name = f"llm_{name}"
+                names.append(feat_name)
+                # Store expr + std for predict-time re-evaluation
+                self._llm_feat_exprs[feat_name] = {"expr": expr, "std": float(std)}
                 self._llm_feat_accepted += 1
                 self._llm_feat_history.append({
                     "round": self._llm_rounds,
-                    "name": f"llm_{name}",
+                    "name": feat_name,
                     "expr": expr,
                     "why": feat.get("why", "")[:80],
-                    "outcome": None,  # filled later when coefs finalize or prune runs
+                    "outcome": None,
                 })
                 self._log(f"      + {name}: {expr[:40]} (std={std:.3f})")
             except Exception as e:
@@ -510,10 +516,11 @@ class SINDyNAUAdapter:
                 # Current val MSE estimate (approximate — use in-sample mse as proxy).
                 cur_val_mse = float(np.mean(remainder_s ** 2))
                 nau_L = float(self._nau_head.L_eff) if self._nau_head is not None else None
+                _nau_L_str = f"{nau_L:.3f}" if nau_L is not None else "N/A"
                 self._log(f"    [LLM Role #2] ctx: round={round_num}, "
                           f"prev_accepted={len(prev_accepted_llm)}, "
                           f"val_mse={cur_val_mse:.5f}, "
-                          f"L_eff={nau_L:.3f if nau_L is not None else -1}, "
+                          f"L_eff={_nau_L_str}, "
                           f"history={len(self._llm_feat_history)} entries")
                 llm_feats = self._claude_oracle.role2_feature_hypotheses(
                     env_description=self._env_desc_llm,
@@ -558,14 +565,28 @@ class SINDyNAUAdapter:
         # Update feature names to include extras
         all_names = list(self._feature_names) + extra_names
         self._feature_names = all_names
-        # Save expand specs for predict-time reconstruction
+        # Save expand specs for predict-time reconstruction.
+        # CRITICAL: LLM features must be stored SEPARATELY from orthogonal
+        # features — OrthogonalExpander cannot regenerate LLM names.
+        self._expand_specs = []
         if self._env_type is not None:
-            self._expand_specs = [{"type": "llm_oracle", "env_type": self._env_type}]
+            self._expand_specs.append(
+                {"type": "llm_oracle", "env_type": self._env_type})
         else:
-            # Orthogonal expand: store as "regenerate" spec — use OrthogonalExpander
-            # at predict time to regenerate the same candidates by name
-            self._expand_specs = [{"type": "orthogonal", "names": extra_names}]
-            # Also store obs/act dims for reconstruction
+            orth_names = [n for n in extra_names
+                          if not (isinstance(n, str) and n.startswith("llm_"))]
+            llm_names = [n for n in extra_names
+                         if isinstance(n, str) and n.startswith("llm_")]
+            if orth_names:
+                self._expand_specs.append({"type": "orthogonal", "names": orth_names})
+            if llm_names:
+                # Preserve ORDER of llm_names so predict-time concat matches fit-time.
+                self._expand_specs.append({
+                    "type": "llm_features",
+                    "items": [(n, self._llm_feat_exprs.get(n, {}).get("expr", ""),
+                               self._llm_feat_exprs.get(n, {}).get("std", 1.0))
+                              for n in llm_names],
+                })
             self._expand_obs_dim = self.obs_dim
             self._expand_act_dim = self.act_dim
 
@@ -647,18 +668,11 @@ class SINDyNAUAdapter:
         self._active_mask_t = torch.FloatTensor(mask).to(self.device)
         n_active_total = int(mask.sum())
         self._log(f"  SGD coef layer initialized: {n_active_total} active coefficients (locked sparsity)")
-
-        # Update LLM feature outcomes for Role #2 history feedback.
-        try:
-            final_names = list(self._library.get_feature_names_out()) if hasattr(
-                self._library, "get_feature_names_out") else []
-            if hasattr(self, "_expand_names") and self._expand_names:
-                final_names = final_names + list(self._expand_names)
-            self._update_llm_history_outcomes(final_names, coefs)
-        except Exception as e:
-            self._log(f"  (skip LLM history outcome update: {e})")
-
         self._loop_done = True
+        # Note: LLM feature history outcomes are filled later by prune_llm_features()
+        # when Role #4 reviews them.  We do NOT update them inline here because the
+        # feature-name ↔ coefficient alignment is non-trivial across SINDy+orth_expand
+        # boundaries and risks crashing the long-running fit.
 
     def _build_full_theta(self, SA):
         """Build full feature matrix including expanded columns."""
@@ -669,16 +683,43 @@ class SINDyNAUAdapter:
                     oracle = LLMOracle(env_type=spec['env_type'])
                     cols, _, _ = oracle.suggest_features(
                         SA, obs_dim=self.obs_dim, act_dim=self.act_dim)
-                    return np.hstack([Theta, cols])
+                    Theta = np.hstack([Theta, cols])
                 elif spec['type'] == 'orthogonal':
-                    # Regenerate candidates by name
                     oe = OrthogonalExpander(self.obs_dim, self.act_dim)
                     all_cands, all_names = oe._generate_candidates(SA, len(SA))
-                    selected_names = set(spec['names'])
+                    name_to_col = {n: c for c, n in zip(all_cands, all_names)}
                     extra = []
-                    for c, n in zip(all_cands, all_names):
-                        if n in selected_names:
-                            extra.append(c)
+                    for n in spec['names']:  # preserve original order
+                        if n in name_to_col:
+                            extra.append(name_to_col[n])
+                    if extra:
+                        Theta = np.hstack([Theta, np.column_stack(extra)])
+                elif spec['type'] == 'llm_features':
+                    # Re-evaluate LLM-proposed expressions on new SA points.
+                    # Uses same sandboxed namespace as _eval_llm_features.
+                    safe_globals = {"__builtins__": {}, "np": np}
+                    s_arr = SA[:, :self.obs_dim]
+                    a_arr = SA[:, self.obs_dim:]
+                    extra = []
+                    for _name, expr, std in spec['items']:
+                        if not expr or any(bad in expr for bad in (
+                                "__", "import", "open(", "os.", "sys.",
+                                "eval(", "exec(")):
+                            extra.append(np.zeros(len(SA)))  # safe zero-fill
+                            continue
+                        try:
+                            col = eval(expr, safe_globals,
+                                        {"s": s_arr.T, "a": a_arr.T})
+                            col = np.asarray(col, dtype=np.float64)
+                            if col.shape != (len(SA),):
+                                extra.append(np.zeros(len(SA)))
+                                continue
+                            if not np.all(np.isfinite(col)):
+                                extra.append(np.zeros(len(SA)))
+                                continue
+                            extra.append(col / max(std, 1e-8))
+                        except Exception:
+                            extra.append(np.zeros(len(SA)))
                     if extra:
                         Theta = np.hstack([Theta, np.column_stack(extra)])
         return Theta

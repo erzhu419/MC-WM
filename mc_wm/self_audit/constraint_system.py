@@ -581,6 +581,16 @@ class ConstraintSystem:
 
         N = len(states)
         ok_mask, _ = self.check_batch(states, actions, s_corrected, r_corrected)
+        # Guard: if EVERYTHING is being rejected (some LLM constraint too
+        # strict), skip audit to avoid crash and flag the issue loudly.
+        n_ok = int(ok_mask.sum())
+        if n_ok == 0:
+            self._log(f"  Constraint audit skipped: 0/{N} transitions pass — "
+                      f"constraint set likely over-restrictive (Role #4 prune needed)")
+            return
+        if n_ok < 10:
+            self._log(f"  Constraint audit skipped: only {n_ok}/{N} transitions pass")
+            return
 
         # Among passing transitions, find those with large corrections
         mag = corrections_magnitude  # (N,) — per-transition correction magnitude

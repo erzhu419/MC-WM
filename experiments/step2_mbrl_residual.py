@@ -84,26 +84,77 @@ class ReplayBuffer:
         return self.s[idx]
 
 
-def collect_transitions(env_cls, mode, n_steps, policy_fn=None, seed=42):
-    """Collect transitions. Returns (s, a, r, s2, done).
-    Uses pre-allocated numpy arrays to avoid Python list → np.array peak memory.
+def collect_transitions(env_cls, mode, n_steps, policy_fn=None, seed=42,
+                         n_envs: int = 1):
     """
-    env = env_cls(mode=mode)
-    od = env.observation_space.shape[0]; ad = env.action_space.shape[0]
+    Collect transitions. Returns (s, a, r, s2, done).
+
+    For light envs (HalfCheetah) serial is FASTER — env.step is ~75μs,
+    subprocess IPC dominates.  Bench: 50k HalfCheetah serial = 3.77s,
+    parallel-8 = 6.00s (0.63×).  Default serial.
+
+    For heavier envs (contact-rich Ant, rendering-enabled envs), parallel
+    can help — caller can pass `n_envs=8` to opt in.
+    """
+    # Serial fallback (policy-guided or n_envs=1)
+    if n_envs <= 1 or policy_fn is not None:
+        env = env_cls(mode=mode)
+        od = env.observation_space.shape[0]; ad = env.action_space.shape[0]
+        s_buf  = np.empty((n_steps, od), np.float32)
+        a_buf  = np.empty((n_steps, ad), np.float32)
+        r_buf  = np.empty(n_steps, np.float32)
+        s2_buf = np.empty((n_steps, od), np.float32)
+        d_buf  = np.empty(n_steps, np.float32)
+        obs, _ = env.reset(seed=seed); ep = 0
+        for i in range(n_steps):
+            a = env.action_space.sample() if policy_fn is None else policy_fn(obs)
+            obs2, r, d, tr, _ = env.step(a)
+            s_buf[i]=obs; a_buf[i]=a; r_buf[i]=r; s2_buf[i]=obs2; d_buf[i]=float(d and not tr)
+            obs = obs2
+            if d or tr: ep += 1; obs, _ = env.reset(seed=seed+ep)
+        env.close()
+        return s_buf, a_buf, r_buf, s2_buf, d_buf, ep
+
+    # Parallel via AsyncVectorEnv
+    import gymnasium as gym
+    def _make(i):
+        def _f():
+            return env_cls(mode=mode)
+        return _f
+    envs = gym.vector.AsyncVectorEnv([_make(i) for i in range(n_envs)])
+    od = envs.single_observation_space.shape[0]
+    ad = envs.single_action_space.shape[0]
     s_buf  = np.empty((n_steps, od), np.float32)
     a_buf  = np.empty((n_steps, ad), np.float32)
     r_buf  = np.empty(n_steps, np.float32)
     s2_buf = np.empty((n_steps, od), np.float32)
     d_buf  = np.empty(n_steps, np.float32)
-    obs, _ = env.reset(seed=seed); ep = 0
-    for i in range(n_steps):
-        a = env.action_space.sample() if policy_fn is None else policy_fn(obs)
-        obs2, r, d, tr, _ = env.step(a)
-        s_buf[i]=obs; a_buf[i]=a; r_buf[i]=r; s2_buf[i]=obs2; d_buf[i]=float(d and not tr)
+    # Seed each worker differently for diversity.
+    seeds = [seed + 1000 * i for i in range(n_envs)]
+    obs, _ = envs.reset(seed=seeds)
+    ep_total = 0
+    steps_per_worker = (n_steps + n_envs - 1) // n_envs
+    write_idx = 0
+    for t in range(steps_per_worker):
+        if write_idx >= n_steps:
+            break
+        actions = np.stack([envs.single_action_space.sample() for _ in range(n_envs)])
+        obs2, rewards, terminated, truncated, _ = envs.step(actions)
+        # Write as many transitions as fit.
+        available = min(n_envs, n_steps - write_idx)
+        s_buf[write_idx:write_idx+available]  = obs[:available]
+        a_buf[write_idx:write_idx+available]  = actions[:available]
+        r_buf[write_idx:write_idx+available]  = rewards[:available]
+        s2_buf[write_idx:write_idx+available] = obs2[:available]
+        d_buf[write_idx:write_idx+available]  = [
+            float(d and not tr)
+            for d, tr in zip(terminated[:available], truncated[:available])
+        ]
+        ep_total += int(terminated[:available].sum() + truncated[:available].sum())
+        write_idx += available
         obs = obs2
-        if d or tr: ep += 1; obs, _ = env.reset(seed=seed+ep)
-    env.close()
-    return s_buf, a_buf, r_buf, s2_buf, d_buf, ep
+    envs.close()
+    return s_buf, a_buf, r_buf, s2_buf, d_buf, ep_total
 
 
 def collect_paired(env_cls, n_steps, policy_fn=None, seed=42):

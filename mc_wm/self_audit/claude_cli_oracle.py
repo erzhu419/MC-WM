@@ -303,11 +303,22 @@ TASK: Propose hard Type 2 physical constraints.  Requirements:
   - State-dependent (not trivial global bounds)
   - NOT about extrapolation / unseen regimes (that's Type 1)
 
-Respond with ONE json block containing a list of up to 8 constraints:
+CRITICAL SEMANTICS for `check`:
+  `check` is a Python boolean expression that evaluates to True when the
+  transition should be REJECTED (i.e. the state is INFEASIBLE).  For
+  example, to forbid "torso angle beyond ±1.5 rad" use:
+      "check": "abs(s[1]) > 1.5"      ← True = violation, reject it
+  NOT:
+      "check": "abs(s[1]) < 1.5"      ← this says "valid" — would reject
+                                         EVERY normal transition!
+
+Respond with ONE json block containing a list of up to 8 constraints.
+REMEMBER: `check` returns True WHEN INFEASIBLE (to be rejected):
 
 ```json
 [
-  {{"name": "max_joint_angle", "check": "abs(s[1]) < 1.5", "why": "torso flip would make reward meaningless"}}
+  {{"name": "torso_inverted", "check": "abs(s[1]) > 1.5", "why": "torso flip (violation when True)"}},
+  {{"name": "below_ground",   "check": "s[0] < 0.0",      "why": "body below ground is impossible"}}
 ]
 ```
 
@@ -637,12 +648,18 @@ TASK: Decide:
      NOT duplicate of an existing one listed above.
   3. If valid: set new_constraint to null and explain.
 
+IMPORTANT: if you propose a new_constraint, `check` must be a Python
+boolean expression that returns True WHEN THE TRANSITION IS INFEASIBLE
+(to be rejected), e.g. `"abs(s[9]) > 20.0"`.  Do NOT write a feasibility
+check like `"abs(s[9]) < 20.0"` — that inverts the semantics and causes
+EVERY valid state to be rejected.
+
 Respond with ONE json block:
 ```json
 {{
   "verdict": "infeasible" | "valid_large_correction",
   "reasoning": "...",
-  "new_constraint": {{"name": "...", "check": "...", "why": "..."}} | null
+  "new_constraint": {{"name": "joint_over_limit", "check": "abs(s[2]) > 2.0", "why": "..."}} | null
 }}
 ```
 No prose outside the JSON block.
