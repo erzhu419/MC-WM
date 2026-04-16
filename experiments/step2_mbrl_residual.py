@@ -36,7 +36,7 @@ from mc_wm.self_audit.constraint_system import ConstraintSystem
 from mc_wm.self_audit.icrl_constraint import ResidualAwareICRL
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SEED = 42
+SEED = 42  # overridden by --seed at runtime
 
 # Data collection
 N_SIM_PRETRAIN = 50_000   # sim transitions for M_sim
@@ -213,6 +213,7 @@ def evaluate(agent, env_cls, n_eps=N_EVAL_EPS):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", default="c1", choices=["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10"])
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--env", default="gravity",
                         choices=["gravity", "gravity_ceiling", "gravity_soft_ceiling",
                                  "carpet_ant", "ant_wall_broken", "friction_walker_soft_ceiling"])
@@ -249,6 +250,8 @@ def main():
                              "claude-sonnet-4-6 for harder reasoning tasks).")
     args = parser.parse_args()
     mode = args.mode
+    global SEED
+    SEED = args.seed
 
     _suffix = f"_{args.icrl_mode}" if mode == "c10" else ""
     if mode == "c10" and args.icrl_combine == "soft":
@@ -261,6 +264,8 @@ def main():
         _suffix += "_kanPhi"
     if args.qdelta_gamma > 0:
         _suffix += f"_qdg{int(args.qdelta_gamma*100):02d}"
+    if args.seed != 42:
+        _suffix += f"_s{args.seed}"
     log_path = f"/tmp/step2_{mode}_{args.env}{_suffix}.log"
     def log(msg=""):
         print(msg, flush=True)
