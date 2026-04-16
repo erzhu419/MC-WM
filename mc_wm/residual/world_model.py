@@ -304,7 +304,12 @@ class CorrectedWorldModel:
         self.residual = residual
 
     def predict(self, states, actions, deterministic=False):
-        """Predict with residual correction."""
+        """
+        Predict with residual correction.
+
+        Returns (next_states, rewards) for backward compatibility.
+        Use `predict_full_tuple` for the full (next_states, rewards, dones).
+        """
         next_s_sim, r_sim = self.wm.predict(states, actions, deterministic)
         if self.residual._trained:
             ds_corr, dr_corr = self.residual.predict_correction(states, actions)
@@ -312,6 +317,23 @@ class CorrectedWorldModel:
             r_real = r_sim + dr_corr
             return next_s_real, r_real
         return next_s_sim, r_sim
+
+    def predict_full_tuple(self, states, actions, deterministic=False):
+        """
+        Full-tuple prediction: (next_states, rewards, done_probs).
+
+        done_probs ∈ [0, 1]^N — P(done | s, a, s').  Callers may
+        threshold at 0.5 or sample Bernoulli.  Returns 0 if residual
+        doesn't have a trained done head.
+        """
+        import numpy as np
+        ns, r = self.predict(states, actions, deterministic)
+        if (self.residual._trained and
+                hasattr(self.residual, "predict_done")):
+            d = self.residual.predict_done(states, actions, ns)
+        else:
+            d = np.zeros(len(states))
+        return ns, r, d
 
     def imagine_rollout(self, start_states, policy_fn, horizon=5, deterministic=False):
         """

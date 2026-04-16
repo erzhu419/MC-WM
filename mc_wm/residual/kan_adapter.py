@@ -69,6 +69,13 @@ class KANResidualAdapter:
             def L_eff(self_inner): return outer._L_eff
         self._nau_head = _DummyHead()
         self._trained = False
+        self._done_trained = False
+        # Termination head: P(done | s, a, s') via small MLP + BCE.
+        self._done_net = nn.Sequential(
+            nn.Linear(obs_dim + act_dim + obs_dim, 64), nn.ReLU(),
+            nn.Linear(64, 1),
+        ).to(device)
+        self._done_opt = optim.Adam(self._done_net.parameters(), lr=1e-3)
 
     def _normalize_s(self, s):
         if self._s_mean is None: return s
@@ -79,7 +86,7 @@ class KANResidualAdapter:
         self._s_std = torch.FloatTensor(s.std(0) + 1e-6).to(self.device)
 
     def fit(self, s, a, ns_sim, r_sim, ns_real, r_real,
-            n_epochs=50, patience=15, batch_size=512, **kwargs):
+            n_epochs=50, patience=15, batch_size=512, real_dones=None, **kwargs):
         """
         Fit KAN state + MLP reward residuals.
           Δs_target = ns_real - ns_sim
@@ -136,6 +143,23 @@ class KANResidualAdapter:
         self._log(f"  KAN fit: val_MSE={best_val:.5f} @ep{best_epoch}, L_eff={self._L_eff:.2f}")
         self._trained = True
 
+        # Train termination head if real_dones provided.
+        if real_dones is not None:
+            SAS_t = torch.FloatTensor(
+                np.concatenate([s, a, ns_real], axis=-1).astype(np.float32)
+            ).to(self.device)
+            d_t = torch.FloatTensor(
+                np.asarray(real_dones, dtype=np.float32).reshape(-1, 1)
+            ).to(self.device)
+            for ep in range(50):
+                logits = self._done_net(SAS_t)
+                loss_d = nn.functional.binary_cross_entropy_with_logits(logits, d_t)
+                self._done_opt.zero_grad(); loss_d.backward(); self._done_opt.step()
+            n_pos = int(d_t.sum().item())
+            self._log(f"  Done MLP: BCE={float(loss_d):.5f} "
+                      f"(pos/total={n_pos}/{len(s)}, {100*n_pos/len(s):.1f}%)")
+            self._done_trained = True
+
     def predict_correction(self, states, actions):
         """SINDy-compatible interface: returns (Δs, Δr) as numpy arrays."""
         self._kan_state.eval(); self._mlp_reward.eval()
@@ -146,6 +170,17 @@ class KANResidualAdapter:
             ds = self._kan_state(inp).cpu().numpy()
             dr = self._mlp_reward(inp).cpu().numpy().squeeze(-1)
         return ds, dr
+
+    def predict_done(self, states, actions, next_states):
+        """P(done | s, a, s') ∈ [0, 1]."""
+        if not self._done_trained:
+            return np.zeros(len(states))
+        SAS = np.concatenate([states, actions, next_states],
+                             axis=-1).astype(np.float32)
+        with torch.no_grad():
+            logits = self._done_net(
+                torch.FloatTensor(SAS).to(self.device)).squeeze(-1)
+            return torch.sigmoid(logits).cpu().numpy()
 
     def get_active_terms(self):
         """KAN doesn't have discrete terms; return dict-compatible summary."""

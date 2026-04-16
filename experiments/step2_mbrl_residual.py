@@ -599,7 +599,8 @@ def main():
                 residual.fit(env_buf.s[idx_fit], env_buf.a[idx_fit],
                             ns_sim_p, r_sim_p,
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
-                            n_epochs=50, patience=15)
+                            n_epochs=50, patience=15,
+                            real_dones=env_buf.d[idx_fit].squeeze())
                 corrected = CorrectedWorldModel(wm_sim, residual)
                 model_buf.reset()  # clear stale rollouts without reallocating
 
@@ -708,7 +709,7 @@ def main():
                                         claude_oracle=_claude,  # Role #2 hypotheses
                                         env_description_for_llm=_env_desc)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
-                     n_epochs=100, patience=20)
+                     n_epochs=100, patience=20, real_dones=d_real)
 
         corrected = CorrectedWorldModel(wm_sim, residual)
 
@@ -814,7 +815,8 @@ def main():
                 residual.fit(env_buf.s[idx_fit], env_buf.a[idx_fit],
                             ns_sim_p, r_sim_p,
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
-                            n_epochs=50, patience=15)
+                            n_epochs=50, patience=15,
+                            real_dones=env_buf.d[idx_fit].squeeze())
                 corrected = CorrectedWorldModel(wm_sim, residual)
                 model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
@@ -851,7 +853,7 @@ def main():
                     start_states = env_buf.s[s_idx]
                     actions = np.array([agent.get_action(ss, deterministic=False)
                                        for ss in start_states])
-                    ns_pred, r_pred = corrected.predict(
+                    ns_pred, r_pred, d_pred = corrected.predict_full_tuple(
                         start_states, actions, deterministic=False)
 
                     if mode in ("c9", "c10"):
@@ -895,15 +897,18 @@ def main():
                         # Filter zero-weight transitions
                         valid = np.where(w > 0.01)[0]
                         if len(valid) > 0:
+                            # Full-tuple: use predicted done instead of zeros.
+                            d_valid = (d_pred[valid] > 0.5).astype(np.float32).reshape(-1, 1)
                             model_buf.add_batch(
                                 start_states[valid], actions[valid],
                                 r_weighted[valid].reshape(-1, 1), ns_pred[valid],
-                                np.zeros((len(valid), 1), np.float32))
+                                d_valid)
                     else:
+                        d_all = (d_pred > 0.5).astype(np.float32).reshape(-1, 1)
                         model_buf.add_batch(
                             start_states, actions,
                             r_pred.reshape(-1, 1), ns_pred,
-                            np.zeros((_rb, 1), np.float32))
+                            d_all)
 
                 agent.update(env_buf)
                 if model_buf.size >= BATCH_SIZE:

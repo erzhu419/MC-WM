@@ -94,6 +94,14 @@ class SINDyNAUAdapter:
         ).to(device)
         self._reward_opt = optim.Adam(self._reward_net.parameters(), lr=lr, weight_decay=1e-4)
 
+        # Termination prediction head: P(done | s, a, s') → full-tuple residual.
+        # Binary classifier via BCE loss on real done labels.
+        self._done_net = tnn.Sequential(
+            tnn.Linear(obs_dim + act_dim + obs_dim, 64), tnn.ReLU(),
+            tnn.Linear(64, 1),
+        ).to(device)
+        self._done_opt = optim.Adam(self._done_net.parameters(), lr=lr, weight_decay=1e-4)
+
         # SGD-based coefficient layer for smooth online refit
         # Initialized after first fit with discovered sparsity pattern
         self._coef_layer = None  # nn.Linear(n_features, n_outputs, bias=False)
@@ -313,10 +321,14 @@ class SINDyNAUAdapter:
         return coefs, active, errors
 
     def fit(self, states, actions, sim_next_states, sim_rewards,
-            real_next_states, real_rewards, n_epochs=100, batch_size=256, patience=20):
+            real_next_states, real_rewards, n_epochs=100, batch_size=256, patience=20,
+            real_dones=None):
         """
         First call: self-hypothesis loop discovers features → NAU fine-tune.
         Subsequent calls (refit): reuse discovered features, warm-start NAU only.
+
+        `real_dones`: optional (N,) float array of done flags from real env.
+        When provided, trains the termination prediction head P(done|s,a,s').
         """
         sim_deltas = sim_next_states - states
         real_deltas = real_next_states - states
@@ -352,6 +364,48 @@ class SINDyNAUAdapter:
             if ep - best_r_ep >= 20: break
         self._reward_net.load_state_dict(best_r_state)
         self._log(f"  Reward MLP: val MSE={best_r_val:.5f} (separate from state SINDy)")
+
+        # ── Train termination (done) prediction head: P(done | s, a, s')
+        if real_dones is not None:
+            SAS_t = torch.FloatTensor(
+                np.concatenate([states, actions, real_next_states], axis=-1).astype(np.float32)
+            ).to(self.device)
+            d_t = torch.FloatTensor(
+                np.asarray(real_dones, dtype=np.float32).reshape(-1, 1)
+            ).to(self.device)
+            perm_d = np.random.permutation(N)
+            n_val_d = max(int(N * 0.1), 50)
+            best_d_val = float('inf')
+            best_d_state = self._done_net.state_dict().copy()
+            best_d_ep = 0
+            for ep in range(80):
+                self._done_net.train()
+                for i in range(0, N - n_val_d, 256):
+                    bi = perm_d[n_val_d + i:n_val_d + i + 256]
+                    if len(bi) == 0:
+                        break
+                    logits = self._done_net(SAS_t[bi])
+                    loss_d = nn.BCEWithLogitsLoss()(logits, d_t[bi])
+                    self._done_opt.zero_grad()
+                    loss_d.backward()
+                    self._done_opt.step()
+                self._done_net.eval()
+                with torch.no_grad():
+                    v_logits = self._done_net(SAS_t[perm_d[:n_val_d]])
+                    vl = float(nn.BCEWithLogitsLoss()(v_logits, d_t[perm_d[:n_val_d]]))
+                    if vl < best_d_val:
+                        best_d_val = vl
+                        best_d_ep = ep
+                        best_d_state = self._done_net.state_dict().copy()
+                if ep - best_d_ep >= 15:
+                    break
+            self._done_net.load_state_dict(best_d_state)
+            n_pos = int(d_t.sum().item())
+            self._log(f"  Done MLP: val BCE={best_d_val:.5f} "
+                      f"(pos/total={n_pos}/{N}, {100*n_pos/N:.1f}%)")
+            self._done_trained = True
+        else:
+            self._done_trained = getattr(self, "_done_trained", False)
 
         # ── REFIT path: SGD warm-start (not STLSQ re-solve)
         # Sparsity pattern is FIXED from initial loop. Only coefficient VALUES update.
@@ -740,6 +794,23 @@ class SINDyNAUAdapter:
             dr = self._reward_net(SA_t).cpu().numpy().squeeze(-1)  # (N,)
 
         return ds, dr
+
+    def predict_done(self, states, actions, next_states):
+        """
+        P(done | s, a, s') ∈ [0, 1]  — full-tuple termination prediction.
+
+        Returns (N,) float array of done probabilities.  Caller typically
+        thresholds at 0.5 or samples Bernoulli.
+        """
+        if not getattr(self, "_done_trained", False):
+            return np.zeros(len(states))
+        SAS = np.concatenate([states, actions, next_states],
+                             axis=-1).astype(np.float32)
+        SAS_t = torch.FloatTensor(SAS).to(self.device)
+        with torch.no_grad():
+            logits = self._done_net(SAS_t).squeeze(-1)
+            probs = torch.sigmoid(logits).cpu().numpy()
+        return probs
 
     def get_ood_bound(self, states, actions):
         """
