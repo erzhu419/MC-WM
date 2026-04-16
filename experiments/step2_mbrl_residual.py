@@ -902,17 +902,25 @@ def main():
                         # Filter zero-weight transitions
                         valid = np.where(w > 0.01)[0]
                         if len(valid) > 0:
-                            # Full-tuple: use soft done probability (no threshold).
-                            # SAC Q_target = r + γ*(1-d)*Q(s'): d=0.02 → 0.98× bootstrap.
-                            # Hard threshold (>0.5) causes false-positive Q-collapse on
-                            # soft-ceiling envs where real done rate is <1%.
-                            d_valid = d_pred[valid].astype(np.float32).reshape(-1, 1)
+                            # Full-tuple: only use predicted dones when env has
+                            # meaningful termination (done_rate > 2% in real data).
+                            # On soft-ceiling (done_rate < 1%), Δd adds noise that
+                            # systematically discounts Q-targets by ~3% → harmful.
+                            _done_rate = float(env_buf.d[:env_buf.size].mean()) if env_buf.size > 0 else 0.0
+                            if _done_rate > 0.02 and hasattr(residual, 'predict_done'):
+                                d_valid = d_pred[valid].astype(np.float32).reshape(-1, 1)
+                            else:
+                                d_valid = np.zeros((len(valid), 1), np.float32)
                             model_buf.add_batch(
                                 start_states[valid], actions[valid],
                                 r_weighted[valid].reshape(-1, 1), ns_pred[valid],
                                 d_valid)
                     else:
-                        d_all = d_pred.astype(np.float32).reshape(-1, 1)
+                        _done_rate = float(env_buf.d[:env_buf.size].mean()) if env_buf.size > 0 else 0.0
+                        if _done_rate > 0.02 and hasattr(residual, 'predict_done'):
+                            d_all = d_pred.astype(np.float32).reshape(-1, 1)
+                        else:
+                            d_all = np.zeros((_rb, 1), np.float32)
                         model_buf.add_batch(
                             start_states, actions,
                             r_pred.reshape(-1, 1), ns_pred,
