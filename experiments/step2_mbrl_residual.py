@@ -902,14 +902,17 @@ def main():
                         # Filter zero-weight transitions
                         valid = np.where(w > 0.01)[0]
                         if len(valid) > 0:
-                            # Full-tuple: use predicted done instead of zeros.
-                            d_valid = (d_pred[valid] > 0.5).astype(np.float32).reshape(-1, 1)
+                            # Full-tuple: use soft done probability (no threshold).
+                            # SAC Q_target = r + γ*(1-d)*Q(s'): d=0.02 → 0.98× bootstrap.
+                            # Hard threshold (>0.5) causes false-positive Q-collapse on
+                            # soft-ceiling envs where real done rate is <1%.
+                            d_valid = d_pred[valid].astype(np.float32).reshape(-1, 1)
                             model_buf.add_batch(
                                 start_states[valid], actions[valid],
                                 r_weighted[valid].reshape(-1, 1), ns_pred[valid],
                                 d_valid)
                     else:
-                        d_all = (d_pred > 0.5).astype(np.float32).reshape(-1, 1)
+                        d_all = d_pred.astype(np.float32).reshape(-1, 1)
                         model_buf.add_batch(
                             start_states, actions,
                             r_pred.reshape(-1, 1), ns_pred,
