@@ -708,12 +708,12 @@ def main():
             elif args.env.startswith("ant_wall_broken"):
                 _env_desc = ("Ant-v4; real has action[4:]=0 (back legs broken). "
                              "Hard wall x<-3 terminates episode"
-                             + (" + soft z-ceiling: continuous penalty when z>1.0."
+                             + (" + soft velocity cap: continuous penalty when |vx|>1.5."
                                 if args.env.endswith("soft_ceiling") else "."))
             elif args.env.startswith("carpet_ant"):
                 _env_desc = ("Ant-v4 on soft carpet: real has damped contact velocities "
                              + "and motor current penalty. "
-                             + ("Soft ceiling z>1.0 penalizes hopping."
+                             + ("Soft velocity cap |vx|>1.5 penalizes running too fast."
                                 if args.env.endswith("soft_ceiling") else ""))
             log(f"  [LLM] Claude oracle enabled: model={args.claude_model}")
 

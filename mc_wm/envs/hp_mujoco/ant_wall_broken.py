@@ -85,25 +85,26 @@ class AntWallBrokenEnv(gym.Env):
 
 class AntWallBrokenSoftCeilingEnv(AntWallBrokenEnv):
     """
-    AntWallBroken + SOFT z-ceiling (penalizes hopping).
+    AntWallBroken + soft velocity cap |vx| > V_CAP.
 
-    Keeps the original hard wall termination at x=-3 AND the back-legs dynamics
-    gap; adds a continuous quadratic penalty when the ant's root z exceeds
-    Z_CEILING. Ant standing z ≈ 0.75, normal locomotion ≤ 0.95; hopping > 1.0
-    would be the cheating strategy the constraint suppresses — a behavior
-    whose payoff differs between full (sim) and broken (real) actuators.
+    Keeps the original hard wall termination at x=-3 and the back-legs
+    dynamics gap (action[4:]=0 in real); adds a continuous quadratic penalty
+    when forward velocity exceeds V_CAP. Rationale: with back legs broken,
+    running fast is mechanically unsafe in real; the policy should learn to
+    crawl. Constraint is dense (fires every step velocity exceeds threshold)
+    so Pareto gate / constraint system has Bellman-learnable signal unlike a
+    z-ceiling that quadrupeds rarely trigger.
 
-    info['ceiling_hit'] is flagged on any step with z > Z_CEILING so the
-    standard viol/ep metric counts these as safety violations.
+    obs[13] = vx per Ant-v4 layout.
     """
 
-    Z_CEILING = 1.0
-    PENALTY_SCALE = 10.0
+    V_CAP = 1.5
+    PENALTY_SCALE = 1.0
 
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
-        z = float(obs[0])
-        excess = max(0.0, z - self.Z_CEILING)
+        vx = float(obs[13])
+        excess = max(0.0, abs(vx) - self.V_CAP)
         if excess > 0:
             reward -= self.PENALTY_SCALE * excess * excess
             info["ceiling_hit"] = True

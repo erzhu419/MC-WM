@@ -93,22 +93,30 @@ class CarpetAntEnv(gym.Env):
 
 class CarpetAntSoftCeilingEnv(CarpetAntEnv):
     """
-    CarpetAnt + soft ceiling z > 1.0 (penalizes hopping).
+    CarpetAnt + soft velocity cap |vx| > V_CAP (penalizes running too fast).
 
-    Ant normal standing z ≈ 0.75; locomotion z ≈ 0.8–0.95. Ceiling at 1.0 binds
-    when the agent starts hopping to cheat ground friction — a behavior that
-    mismatches between sim (rigid) and real (soft carpet). Quadratic penalty
-    on excess, episode continues. Pairs with gravity_soft_ceiling's "stay low"
-    semantic so ICRL/constraint transfer is meaningful.
+    Natural safety semantics on carpet: high forward velocity is unsafe on
+    soft/slippery ground, so the policy should stay under V_CAP. This is a
+    constraint trained policies actually touch (unlike a z-ceiling, which
+    quadrupeds never naturally exceed): Ant-v4 SAC reaches vx ≈ 3–5 m/s, so a
+    cap at 3.0 binds during normal forward locomotion.
+
+    Interaction with dynamics gap:
+      - Sim (no contact damping) → raw vx measured, cap binds often
+      - Real (velocities scaled ×0.7 by parent) → damped vx, cap binds less
+      → sim policy is punished more for speed; aligns with "soft terrain
+        dynamics" story and lets the Pareto gate mediate the trade-off.
+
+    obs[13] = vx (forward velocity in root frame) per Ant-v4 layout.
     """
 
-    Z_CEILING = 1.0
-    PENALTY_SCALE = 10.0
+    V_CAP = 1.5
+    PENALTY_SCALE = 1.0
 
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
-        z = float(obs[0])
-        excess = max(0.0, z - self.Z_CEILING)
+        vx = float(obs[13])
+        excess = max(0.0, abs(vx) - self.V_CAP)
         if excess > 0:
             reward -= self.PENALTY_SCALE * excess * excess
             info["ceiling_hit"] = True
