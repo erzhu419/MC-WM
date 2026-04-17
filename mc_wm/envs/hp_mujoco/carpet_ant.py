@@ -111,7 +111,10 @@ class CarpetAntSoftCeilingEnv(CarpetAntEnv):
     """
 
     V_CAP = 1.0
-    PENALTY_SCALE = 1.0
+    # 0.1 (10x smaller than AntWall's 1.0) because Ant-v4 reward under carpet
+    # damping is 5-10x smaller than AntWall's distance-based reward — a shared
+    # scale would make the constraint dominate reward and collapse training.
+    PENALTY_SCALE = 0.1
 
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
