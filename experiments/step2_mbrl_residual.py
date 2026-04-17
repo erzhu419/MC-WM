@@ -713,7 +713,9 @@ def main():
             elif args.env.startswith("carpet_ant"):
                 _env_desc = ("Ant-v4 on soft carpet: real has damped contact velocities "
                              + "and motor current penalty. "
-                             + ("Soft velocity cap |vx|>1.5 penalizes running too fast."
+                             + ("Soft velocity cap |vx|>1.0 penalizes running too fast "
+                                "(tighter than AntWall's 1.5 because carpet contact damping "
+                                "already reduces observed vx by ~30%)."
                                 if args.env.endswith("soft_ceiling") else ""))
             log(f"  [LLM] Claude oracle enabled: model={args.claude_model}")
 

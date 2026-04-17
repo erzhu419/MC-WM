@@ -110,7 +110,7 @@ class CarpetAntSoftCeilingEnv(CarpetAntEnv):
     obs[13] = vx (forward velocity in root frame) per Ant-v4 layout.
     """
 
-    V_CAP = 1.5
+    V_CAP = 1.0
     PENALTY_SCALE = 1.0
 
     def step(self, action):
