@@ -81,3 +81,30 @@ class AntWallBrokenEnv(gym.Env):
 
     def close(self):
         self._env.close()
+
+
+class AntWallBrokenSoftCeilingEnv(AntWallBrokenEnv):
+    """
+    AntWallBroken + SOFT z-ceiling (penalizes hopping).
+
+    Keeps the original hard wall termination at x=-3 AND the back-legs dynamics
+    gap; adds a continuous quadratic penalty when the ant's root z exceeds
+    Z_CEILING. Ant standing z ≈ 0.75, normal locomotion ≤ 0.95; hopping > 1.0
+    would be the cheating strategy the constraint suppresses — a behavior
+    whose payoff differs between full (sim) and broken (real) actuators.
+
+    info['ceiling_hit'] is flagged on any step with z > Z_CEILING so the
+    standard viol/ep metric counts these as safety violations.
+    """
+
+    Z_CEILING = 1.0
+    PENALTY_SCALE = 10.0
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        z = float(obs[0])
+        excess = max(0.0, z - self.Z_CEILING)
+        if excess > 0:
+            reward -= self.PENALTY_SCALE * excess * excess
+            info["ceiling_hit"] = True
+        return obs, reward, terminated, truncated, info

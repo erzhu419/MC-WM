@@ -89,3 +89,27 @@ class CarpetAntEnv(gym.Env):
 
     def close(self):
         self._env.close()
+
+
+class CarpetAntSoftCeilingEnv(CarpetAntEnv):
+    """
+    CarpetAnt + soft ceiling z > 1.0 (penalizes hopping).
+
+    Ant normal standing z ≈ 0.75; locomotion z ≈ 0.8–0.95. Ceiling at 1.0 binds
+    when the agent starts hopping to cheat ground friction — a behavior that
+    mismatches between sim (rigid) and real (soft carpet). Quadratic penalty
+    on excess, episode continues. Pairs with gravity_soft_ceiling's "stay low"
+    semantic so ICRL/constraint transfer is meaningful.
+    """
+
+    Z_CEILING = 1.0
+    PENALTY_SCALE = 10.0
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        z = float(obs[0])
+        excess = max(0.0, z - self.Z_CEILING)
+        if excess > 0:
+            reward -= self.PENALTY_SCALE * excess * excess
+            info["ceiling_hit"] = True
+        return obs, reward, terminated, truncated, info

@@ -22,8 +22,8 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import torch
 from mc_wm.envs.hp_mujoco.gravity_cheetah import GravityCheetahEnv, GravityCheetahCeilingEnv, GravityCheetahSoftCeilingEnv
-from mc_wm.envs.hp_mujoco.carpet_ant import CarpetAntEnv
-from mc_wm.envs.hp_mujoco.ant_wall_broken import AntWallBrokenEnv
+from mc_wm.envs.hp_mujoco.carpet_ant import CarpetAntEnv, CarpetAntSoftCeilingEnv
+from mc_wm.envs.hp_mujoco.ant_wall_broken import AntWallBrokenEnv, AntWallBrokenSoftCeilingEnv
 from mc_wm.envs.hp_mujoco.friction_walker import FrictionWalkerSoftCeilingEnv
 from mc_wm.policy.resac_agent import RESACAgent
 from mc_wm.policy.qdelta_bellman import QDeltaBellman
@@ -217,7 +217,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--env", default="gravity",
                         choices=["gravity", "gravity_ceiling", "gravity_soft_ceiling",
-                                 "carpet_ant", "ant_wall_broken", "friction_walker_soft_ceiling"])
+                                 "carpet_ant", "carpet_ant_soft_ceiling",
+                                 "ant_wall_broken", "ant_wall_broken_soft_ceiling",
+                                 "friction_walker_soft_ceiling"])
     parser.add_argument("--icrl_mode", default="transition", choices=["transition", "confidence"],
                         help="v4=transition (Δs discriminator), v1=confidence (model-conf input, Type 2 proxy)")
     parser.add_argument("--save_phi", default=None, help="Path to save trained ICRL φ")
@@ -296,8 +298,12 @@ def main():
         env_cls = GravityCheetahSoftCeilingEnv; obs_dim, act_dim = 17, 6
     elif args.env == "carpet_ant":
         env_cls = CarpetAntEnv; obs_dim, act_dim = 27, 8
+    elif args.env == "carpet_ant_soft_ceiling":
+        env_cls = CarpetAntSoftCeilingEnv; obs_dim, act_dim = 27, 8
     elif args.env == "ant_wall_broken":
         env_cls = AntWallBrokenEnv; obs_dim, act_dim = 27, 8
+    elif args.env == "ant_wall_broken_soft_ceiling":
+        env_cls = AntWallBrokenSoftCeilingEnv; obs_dim, act_dim = 27, 8
     elif args.env == "friction_walker_soft_ceiling":
         env_cls = FrictionWalkerSoftCeilingEnv; obs_dim, act_dim = 17, 6
 
@@ -699,8 +705,16 @@ def main():
                 _env_desc = ("Walker2d-v4 with ground friction 0.3x in sim, 1x in real. "
                              "obs[0]=rootz (~1.2), obs[1]=torso_angle, obs[2:8]=joint angles, "
                              "obs[8:17]=velocities.")
-            elif args.env == "ant_wall_broken":
-                _env_desc = ("Ant-v4; real has action[4:]=0 (back legs broken) and wall x<-3.")
+            elif args.env.startswith("ant_wall_broken"):
+                _env_desc = ("Ant-v4; real has action[4:]=0 (back legs broken). "
+                             "Hard wall x<-3 terminates episode"
+                             + (" + soft z-ceiling: continuous penalty when z>1.0."
+                                if args.env.endswith("soft_ceiling") else "."))
+            elif args.env.startswith("carpet_ant"):
+                _env_desc = ("Ant-v4 on soft carpet: real has damped contact velocities "
+                             + "and motor current penalty. "
+                             + ("Soft ceiling z>1.0 penalizes hopping."
+                                if args.env.endswith("soft_ceiling") else ""))
             log(f"  [LLM] Claude oracle enabled: model={args.claude_model}")
 
         # Role #5: Meta-HP orchestrator (optional).
