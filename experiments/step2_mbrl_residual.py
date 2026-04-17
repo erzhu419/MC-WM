@@ -37,6 +37,7 @@ from mc_wm.self_audit.icrl_constraint import ResidualAwareICRL
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42  # overridden by --seed at runtime
+NO_DONE_HEAD = False  # overridden by --no_done_head at runtime
 
 # Data collection
 N_SIM_PRETRAIN = 50_000   # sim transitions for M_sim
@@ -244,14 +245,26 @@ def main():
     parser.add_argument("--enable_icrl", action="store_true",
                         help="Enable ICRL φ even in c9 (stacked with ConstraintSystem + "
                              "Bellman QΔ). Turns c9 into a superset-of-c10 config.")
+    parser.add_argument("--no_done_head", action="store_true",
+                        help="Skip training the Δd (termination) prediction head. "
+                             "Matches pre-d2de74b (overnight) behavior. Useful when "
+                             "done_rate~0 (e.g. gravity_soft_ceiling) so the head is "
+                             "gated off anyway.")
+    parser.add_argument("--role5_pareto_gate", action="store_true",
+                        help="Reject Role #5 HP changes that raise reward-seeking knobs "
+                             "(qdelta_gamma, rollout_batch) while violations are high.")
+    parser.add_argument("--role5_viol_hard_cap", type=float, default=30.0,
+                        help="Role #5 Pareto gate: violation threshold above which "
+                             "reward-seeking HP increases are blocked (viol/ep).")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
                              "claude-sonnet-4-6 for harder reasoning tasks).")
     args = parser.parse_args()
     mode = args.mode
-    global SEED
+    global SEED, NO_DONE_HEAD
     SEED = args.seed
+    NO_DONE_HEAD = bool(args.no_done_head)
 
     _suffix = f"_{args.icrl_mode}" if mode == "c10" else ""
     if mode == "c10" and args.icrl_combine == "soft":
@@ -605,7 +618,7 @@ def main():
                             ns_sim_p, r_sim_p,
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
                             n_epochs=50, patience=15,
-                            real_dones=env_buf.d[idx_fit].squeeze())
+                            real_dones=None if NO_DONE_HEAD else env_buf.d[idx_fit].squeeze())
                 corrected = CorrectedWorldModel(wm_sim, residual)
                 model_buf.reset()  # clear stale rollouts without reallocating
 
@@ -698,9 +711,13 @@ def main():
                 env_description=_env_desc,
                 initial_hp=dict(runtime_cfg),
                 log_fn=log,
+                pareto_gate=bool(args.role5_pareto_gate),
+                viol_hard_cap=float(args.role5_viol_hard_cap),
             )
+            _gate_note = f" (Pareto gate ON, viol_cap={args.role5_viol_hard_cap})" \
+                          if args.role5_pareto_gate else ""
             log(f"  [LLM] Role #5 HP orchestrator enabled, calls every "
-                f"{args.role5_every_n_evals} evals")
+                f"{args.role5_every_n_evals} evals{_gate_note}")
 
         if args.use_kan_residual:
             log(f"  Training KAN residual δ (replaces SINDy+NAU)...")
@@ -714,7 +731,8 @@ def main():
                                         claude_oracle=_claude,  # Role #2 hypotheses
                                         env_description_for_llm=_env_desc)
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
-                     n_epochs=100, patience=20, real_dones=d_real)
+                     n_epochs=100, patience=20,
+                     real_dones=None if NO_DONE_HEAD else d_real)
 
         corrected = CorrectedWorldModel(wm_sim, residual)
 
@@ -821,7 +839,7 @@ def main():
                             ns_sim_p, r_sim_p,
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
                             n_epochs=50, patience=15,
-                            real_dones=env_buf.d[idx_fit].squeeze())
+                            real_dones=None if NO_DONE_HEAD else env_buf.d[idx_fit].squeeze())
                 corrected = CorrectedWorldModel(wm_sim, residual)
                 model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 

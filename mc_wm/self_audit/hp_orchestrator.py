@@ -73,6 +73,10 @@ class HPOrchestrator:
         log_fn=None,
         max_float_step_frac: float = 0.10,   # hard cap on single-change magnitude
         cooldown_steps: int = 2,              # evals to wait after each applied change
+        pareto_gate: bool = False,            # block reward-seeking changes when viol high
+        viol_hard_cap: float = 30.0,          # trigger threshold for the gate (viol/ep)
+        reward_seeking_keys: Optional[set] = None,  # keys blocked from INCREASES under gate
+        safety_decrease_keys: Optional[set] = None, # keys blocked from INCREASES (lower = safer)
     ) -> None:
         self._oracle = oracle
         self._env_desc = env_description
@@ -87,10 +91,20 @@ class HPOrchestrator:
         self.n_rejected = 0
         self.n_skipped_cooldown = 0
         self.n_hard_clamped = 0
+        self.n_pareto_blocked = 0
         self._max_float_step = float(max_float_step_frac)
         self._cooldown = int(cooldown_steps)
         self._last_change_eval_idx = -10**9  # allow first call immediately
         self._eval_idx = 0
+        # Pareto gate: reject changes that raise reward-seeking knobs while
+        # violations are above the hard cap. Keeps LLM from trading safety for
+        # reward during spikes.
+        self._pareto_gate = bool(pareto_gate)
+        self._viol_hard_cap = float(viol_hard_cap)
+        self._reward_seeking = set(reward_seeking_keys or {"qdelta_gamma", "rollout_batch"})
+        # For these keys, lower values are safer (tighter auditing / smaller model
+        # exploitation), so we block INCREASES under the gate.
+        self._safety_decrease = set(safety_decrease_keys or {"audit_percentile"})
 
     # ──────────────────────────────────────────────────────────────────
     # Validation
@@ -177,6 +191,33 @@ class HPOrchestrator:
                     val = new_val
             if val != self._current_hp.get(k):
                 clean[k] = val
+        # Pareto gate: when violations are above the hard cap, block changes
+        # that would raise reward-seeking knobs or loosen safety knobs.
+        # (Decreases are always allowed — safer direction.)
+        if self._pareto_gate and clean:
+            vt = training_metrics.get("violation_trend") or []
+            vt_tail = [float(x) for x in vt[-3:] if x is not None]
+            viol_recent = (sum(vt_tail) / len(vt_tail)) if vt_tail else 0.0
+            if viol_recent > self._viol_hard_cap:
+                blocked = {}
+                for k in list(clean.keys()):
+                    cur = self._current_hp.get(k)
+                    new = clean[k]
+                    if cur is None or not isinstance(new, (int, float)):
+                        continue
+                    is_raise = float(new) > float(cur)
+                    if k in self._reward_seeking and is_raise:
+                        blocked[k] = (cur, new, "reward-seeking raise")
+                        clean.pop(k)
+                    elif k in self._safety_decrease and is_raise:
+                        blocked[k] = (cur, new, "safety knob raise")
+                        clean.pop(k)
+                for k, (cur, new, why) in blocked.items():
+                    self.n_pareto_blocked += 1
+                    self._log(
+                        f"    ⛔ Role #5 Pareto-gate block {k}: {cur}→{new}  "
+                        f"(viol_recent={viol_recent:.1f} > cap={self._viol_hard_cap:.1f}; {why})"
+                    )
         self._propose_history.append({
             "proposed": proposed, "applied": clean, "reasons": reasons,
             "metrics": {k: training_metrics.get(k) for k in
@@ -227,6 +268,7 @@ class HPOrchestrator:
             "n_rejected": self.n_rejected,
             "n_skipped_cooldown": self.n_skipped_cooldown,
             "n_hard_clamped": self.n_hard_clamped,
+            "n_pareto_blocked": self.n_pareto_blocked,
             "n_trials_recorded": len(self._trial_history),
             "final_hp": dict(self._current_hp),
         }
@@ -241,6 +283,7 @@ class HPOrchestrator:
         self._log(f"│ step-size clamps    : {s['n_hard_clamped']}")
         self._log(f"│ cooldown skips      : {s['n_skipped_cooldown']}")
         self._log(f"│ values rejected     : {s['n_rejected']}")
+        self._log(f"│ Pareto-gate blocks  : {s['n_pareto_blocked']}")
         self._log(f"│ trials recorded     : {s['n_trials_recorded']}")
         self._log(f"│ final HP            : {json.dumps(s['final_hp'])[:80]}")
         self._log("└───────────────────────────────────────────")
