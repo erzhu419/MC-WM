@@ -277,6 +277,19 @@ def main():
     parser.add_argument("--beta_skip_threshold", type=float, default=0.2,
                         help="When adaptive β < threshold, skip model rollouts entirely "
                              "(degrade to c1-like real-env-only training). Default 0.2.")
+    parser.add_argument("--adapt_only_delta", action="store_true",
+                        help="Apply adaptive β only to residual scale (β_delta); keep "
+                             "QΔ filter at full strength (β_qdelta=1.0).")
+    parser.add_argument("--adapt_only_qdelta", action="store_true",
+                        help="Apply adaptive β only to QΔ filter (β_qdelta); keep "
+                             "residual at full strength (β_delta=1.0).")
+    parser.add_argument("--beta_bandit", action="store_true",
+                        help="3-phase training-time β bandit: phase A (step 0-15k) at "
+                             "β_initial, phase B (15-30k) at β_alternate, phase C "
+                             "(30-50k) commits to whichever had higher reward.")
+    parser.add_argument("--beta_bandit_alt", type=float, default=-1.0,
+                        help="Alternate β for bandit phase B. If <0, auto-computed as "
+                             "(1.0 - β_initial) clipped to [0.1, 1.0].")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -802,9 +815,21 @@ def main():
                 _sig = min(_state_imp, _nau_imp if _nau_imp is not None else _state_imp)
                 _beta = max(0.05, min(0.95, _sig))
                 _sig_str = f"min(state={_state_imp:.2f}, nau={_nau_imp:.2f})"
-            corrected.beta = float(_beta)
+            # Decouple: set only the component(s) the user asked for
+            if args.adapt_only_delta:
+                corrected.beta_delta = float(_beta)
+                corrected.beta_qdelta = 1.0
+                _which = "β_delta only (qdelta=1.0)"
+            elif args.adapt_only_qdelta:
+                corrected.beta_delta = 1.0
+                corrected.beta_qdelta = float(_beta)
+                _which = "β_qdelta only (delta=1.0)"
+            else:
+                corrected.beta = float(_beta)  # both
+                _which = "both β_delta and β_qdelta"
             log(f"  [Adaptive β] signal={args.adaptive_beta_signal} {_sig_str} "
-                f"→ β={_beta:.3f} (skip_rollout if β<{args.beta_skip_threshold})")
+                f"→ β={_beta:.3f} applied to {_which} "
+                f"(skip_rollout if β<{args.beta_skip_threshold})")
         else:
             _beta = 1.0
             log(f"  [β] gap_ratio={gap_ratio:.2f}, β=1.000 (fixed)")
@@ -888,7 +913,45 @@ def main():
         obs, _ = env_real.reset(seed=SEED); curve = []
         log(f"\n[Phase 2: {mode} MBPO with SINDy+NAU δ] {TRAIN_STEPS//1000}k steps")
 
+        # 3-phase β bandit: explore two β values, commit to winner.
+        # Phase A (step 0–15k): β_initial. Phase B (15–30k): β_alternate.
+        # Phase C (30–50k): whichever had higher mean eval reward.
+        _bandit_on = bool(args.beta_bandit)
+        _bandit_init_beta = corrected.beta_delta  # snapshot β set by signal/default
+        if _bandit_on:
+            _alt = args.beta_bandit_alt
+            if _alt < 0:
+                _alt = float(np.clip(1.0 - _bandit_init_beta, 0.1, 1.0))
+            _bandit_alt_beta = _alt
+            _bandit_rewards = {"A": [], "B": []}  # eval rewards per phase
+            log(f"  [β Bandit] Phase A β={_bandit_init_beta:.2f} (0-15k), "
+                f"Phase B β={_bandit_alt_beta:.2f} (15-30k), "
+                f"Phase C β=winner (30-50k)")
+
         for step in range(1, TRAIN_STEPS+1):
+            # β bandit phase switching
+            if _bandit_on:
+                if step <= 15000:
+                    _target_beta = _bandit_init_beta; _phase = "A"
+                elif step <= 30000:
+                    _target_beta = _bandit_alt_beta; _phase = "B"
+                else:
+                    # Commit to winner at step 30001
+                    _mean_A = float(np.mean(_bandit_rewards["A"])) if _bandit_rewards["A"] else 0.0
+                    _mean_B = float(np.mean(_bandit_rewards["B"])) if _bandit_rewards["B"] else 0.0
+                    _winner_beta = _bandit_init_beta if _mean_A >= _mean_B else _bandit_alt_beta
+                    if step == 30001:
+                        log(f"  [β Bandit] Phase A avg={_mean_A:.1f}, B avg={_mean_B:.1f} "
+                            f"→ committing β={_winner_beta:.2f} for phase C")
+                    _target_beta = _winner_beta; _phase = "C"
+                # Update corrected.beta respecting decouple flags
+                if args.adapt_only_qdelta:
+                    corrected.beta_qdelta = _target_beta
+                elif args.adapt_only_delta:
+                    corrected.beta_delta = _target_beta
+                else:
+                    corrected.beta = _target_beta
+
             a_act = env_real.action_space.sample() if step < WARMUP else agent.get_action(obs, deterministic=False)
             obs2, r_step, d_flag, tr, _ = env_real.step(a_act)
             env_buf.add(obs, a_act, r_step, obs2, float(d_flag and not tr))
@@ -962,10 +1025,11 @@ def main():
                             tau_s = float(np.median(per_s_err)) + 1e-8
                             w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
 
-                        # Adaptive β: blend QΔ filter toward uniform when gap is small.
-                        # β=1 → full QΔ filtering (c9); β=0 → uniform weights (≈c1).
-                        if corrected.beta < 1.0:
-                            w_qdelta = corrected.beta * w_qdelta + (1.0 - corrected.beta)
+                        # Adaptive β_qdelta: blend QΔ filter toward uniform.
+                        # β_qdelta=1 → full QΔ filtering (c9); =0 → uniform weights.
+                        if corrected.beta_qdelta < 1.0:
+                            _bq = corrected.beta_qdelta
+                            w_qdelta = _bq * w_qdelta + (1.0 - _bq)
 
                         # Stacked filters: each module contributes independently.
                         # Final weight = w_qdelta × w_icrl × constraint_mask.
@@ -1028,6 +1092,10 @@ def main():
             if step % EVAL_INTERVAL == 0:
                 ret, std, viol = evaluate(agent, env_cls)
                 curve.append((step, ret, viol))
+                # β bandit: record eval reward under current phase (only during
+                # exploration phases A and B; phase C is the commit phase).
+                if _bandit_on and step <= 30000 and _phase in ("A", "B"):
+                    _bandit_rewards[_phase].append(float(ret))
                 # Feed violation trend + training state + QΔ weight distribution
                 # to constraint_sys so Role #3 can tell "measurement artifact"
                 # from true Type 2 OOD.

@@ -299,10 +299,41 @@ class CorrectedWorldModel:
     Generates imagined rollouts from the corrected model.
     """
 
-    def __init__(self, world_model, residual, beta=1.0):
+    def __init__(self, world_model, residual, beta=1.0,
+                 beta_delta=None, beta_qdelta=None):
         self.wm = world_model
         self.residual = residual
-        self.beta = float(beta)
+        # Decoupled β: beta_delta scales residual correction in predict();
+        # beta_qdelta (used by callers) scales QΔ filter aggressiveness.
+        # Setting `corrected.beta = X` still sets both (backward compat).
+        self._beta_delta = float(beta if beta_delta is None else beta_delta)
+        self._beta_qdelta = float(beta if beta_qdelta is None else beta_qdelta)
+
+    @property
+    def beta(self):
+        return self._beta_delta  # legacy: exposes residual-scale β
+
+    @beta.setter
+    def beta(self, value):
+        v = float(value)
+        self._beta_delta = v
+        self._beta_qdelta = v
+
+    @property
+    def beta_delta(self):
+        return self._beta_delta
+
+    @beta_delta.setter
+    def beta_delta(self, value):
+        self._beta_delta = float(value)
+
+    @property
+    def beta_qdelta(self):
+        return self._beta_qdelta
+
+    @beta_qdelta.setter
+    def beta_qdelta(self, value):
+        self._beta_qdelta = float(value)
 
     def predict(self, states, actions, deterministic=False):
         """
@@ -314,8 +345,8 @@ class CorrectedWorldModel:
         next_s_sim, r_sim = self.wm.predict(states, actions, deterministic)
         if self.residual._trained:
             ds_corr, dr_corr = self.residual.predict_correction(states, actions)
-            next_s_real = next_s_sim + self.beta * ds_corr
-            r_real = r_sim + self.beta * dr_corr
+            next_s_real = next_s_sim + self._beta_delta * ds_corr
+            r_real = r_sim + self._beta_delta * dr_corr
             return next_s_real, r_real
         return next_s_sim, r_sim
 
