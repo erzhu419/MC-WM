@@ -702,6 +702,8 @@ class SINDyNAUAdapter:
             nau_pred = self._nau_head(Theta_t[val_idx])
             sindy_mse = float(nn.MSELoss()(sindy_pred, tgt_t[val_idx]))
             nau_mse = best_val
+        self._sindy_val_mse = float(sindy_mse)
+        self._nau_val_mse = float(nau_mse)
         self._log(f"  SINDy-only val MSE: {sindy_mse:.5f}")
         self._log(f"  NAU val MSE:        {nau_mse:.5f}")
         self._log(f"  NAU improvement:    {(1-nau_mse/sindy_mse)*100:.1f}%")

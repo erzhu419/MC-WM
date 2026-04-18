@@ -269,6 +269,14 @@ def main():
                              "(gap≈2.3) at β≈0.15 and gravity (gap≈5) at β≈0.88.")
     parser.add_argument("--adaptive_beta_scale", type=float, default=0.7,
                         help="Sigmoid steepness for adaptive β. Smaller = sharper cutoff.")
+    parser.add_argument("--adaptive_beta_signal", default="nau",
+                        choices=["state", "nau", "min"],
+                        help="Signal for adaptive β: state (RMSE ratio, high variance), "
+                             "nau (SINDy→NAU improvement %, stable across runs), or "
+                             "min (pessimistic min of both).")
+    parser.add_argument("--beta_skip_threshold", type=float, default=0.2,
+                        help="When adaptive β < threshold, skip model rollouts entirely "
+                             "(degrade to c1-like real-env-only training). Default 0.2.")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -771,15 +779,32 @@ def main():
         r_sim_rmse = np.sqrt(np.mean((r_sim_pred[:2000] - r_real[:2000]) ** 2))
 
         # Adaptive β: port of BAPR-HRO dynamic-β — scale residual trust by gap size.
-        # Small sim-real gap (carpet: ratio≈2.3) → β≈0 (residual adds noise).
-        # Large gap (gravity: ratio≈5) → β≈1 (full correction needed).
+        # Small sim-real gap (carpet) → β≈0 (residual adds noise).
+        # Large gap (gravity) → β≈1 (full correction needed).
         gap_ratio = direct_rmse / max(corr_rmse, 1e-6)
+        # NAU improvement is more stable across runs than state RMSE ratio
+        # (AntWall s42: state ratio 3.55→1.09 noisy; NAU imp 34→41% stable).
+        _nau_imp = None
+        if hasattr(residual, "_nau_val_mse") and hasattr(residual, "_sindy_val_mse"):
+            _nau_imp = max(0.0, 1.0 - residual._nau_val_mse / max(residual._sindy_val_mse, 1e-8))
+        _state_imp = max(0.0, 1.0 - corr_rmse / max(direct_rmse, 1e-6))
+
         if args.adaptive_beta:
-            _beta = 1.0 / (1.0 + np.exp(-(gap_ratio - args.adaptive_beta_center)
-                                          / args.adaptive_beta_scale))
+            if args.adaptive_beta_signal == "state":
+                _beta = 1.0 / (1.0 + np.exp(-(gap_ratio - args.adaptive_beta_center)
+                                              / args.adaptive_beta_scale))
+                _sig_str = f"state_imp={_state_imp:.2f}"
+            elif args.adaptive_beta_signal == "nau":
+                _sig = _nau_imp if _nau_imp is not None else _state_imp
+                _beta = max(0.05, min(0.95, _sig))
+                _sig_str = f"nau_imp={_nau_imp:.2f}" if _nau_imp is not None else f"state_imp={_state_imp:.2f}"
+            else:  # "min"
+                _sig = min(_state_imp, _nau_imp if _nau_imp is not None else _state_imp)
+                _beta = max(0.05, min(0.95, _sig))
+                _sig_str = f"min(state={_state_imp:.2f}, nau={_nau_imp:.2f})"
             corrected.beta = float(_beta)
-            log(f"  [Adaptive β] gap_ratio={gap_ratio:.2f} (center={args.adaptive_beta_center}, "
-                f"scale={args.adaptive_beta_scale}) → β={_beta:.3f}")
+            log(f"  [Adaptive β] signal={args.adaptive_beta_signal} {_sig_str} "
+                f"→ β={_beta:.3f} (skip_rollout if β<{args.beta_skip_threshold})")
         else:
             _beta = 1.0
             log(f"  [β] gap_ratio={gap_ratio:.2f}, β=1.000 (fixed)")
@@ -911,7 +936,12 @@ def main():
                         f"τ={qd_metrics['tau']:.3f} qd_mean={qd_metrics['qd_mean']:.3f}")
 
             if step >= WARMUP and env_buf.size >= BATCH_SIZE:
-                if step % runtime_cfg["rollout_freq"] == 0:
+                # Plan B: when adaptive β is tiny, skip model rollouts entirely —
+                # corrected model is nearly pure sim, which rolls out wrong
+                # dynamics. Agent learns from env_buf only (c1-like fallback).
+                _skip_rollout = (args.adaptive_beta and
+                                 corrected.beta < args.beta_skip_threshold)
+                if step % runtime_cfg["rollout_freq"] == 0 and not _skip_rollout:
                     _rb = runtime_cfg["rollout_batch"]
                     # Sample start states from env_buf (with their real next-states)
                     s_idx = np.random.randint(0, env_buf.size, _rb)
