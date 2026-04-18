@@ -290,6 +290,18 @@ def main():
     parser.add_argument("--beta_bandit_alt", type=float, default=-1.0,
                         help="Alternate β for bandit phase B. If <0, auto-computed as "
                              "(1.0 - β_initial) clipped to [0.1, 1.0].")
+    parser.add_argument("--beta_exp3", type=str, default="",
+                        help="Comma-separated β grid for EXP3 continuous bandit, e.g. "
+                             "'0.3,0.5,0.7,1.0'. Resamples β every eval based on "
+                             "reward-weighted softmax over grid.")
+    parser.add_argument("--beta_hillclimb", action="store_true",
+                        help="Gradient-free hill climb on β: every 3 evals, if recent "
+                             "window reward > older window, keep direction; else "
+                             "reverse. β step size 0.1, clipped to [0.1, 1.0].")
+    parser.add_argument("--beta_multi", type=str, default="",
+                        help="Comma-separated β values, e.g. '0.3,0.6,1.0'. At each "
+                             "rollout, pick β uniformly at random from grid so agent "
+                             "sees rollouts from multiple correction strengths.")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -928,8 +940,35 @@ def main():
                 f"Phase B β={_bandit_alt_beta:.2f} (15-30k), "
                 f"Phase C β=winner (30-50k)")
 
+        # Continuous β adaptation methods (EXP3, hill climb, multi-β).
+        # Only one should be active at a time; all mutually exclusive.
+        _exp3_on = bool(args.beta_exp3)
+        if _exp3_on:
+            _exp3_betas = [float(x) for x in args.beta_exp3.split(",")]
+            _exp3_log_w = np.zeros(len(_exp3_betas))
+            _exp3_eta = 0.5
+            _exp3_idx = 0
+            _exp3_last_r = None
+            _exp3_r_max = 1.0  # running scale for reward normalization
+            log(f"  [EXP3 β] grid={_exp3_betas}, resample every {EVAL_INTERVAL} steps")
+
+        _hc_on = bool(args.beta_hillclimb)
+        if _hc_on:
+            _hc_beta = corrected.beta_delta
+            _hc_direction = -1  # start going down (carpet-friendly direction)
+            _hc_step = 0.1
+            _hc_win = 3
+            _hc_hist = []
+            log(f"  [Hillclimb β] init={_hc_beta:.2f}, step=0.1, window={_hc_win} evals")
+
+        _multi_on = bool(args.beta_multi)
+        if _multi_on:
+            _multi_betas = [float(x) for x in args.beta_multi.split(",")]
+            log(f"  [Multi-β rollout] grid={_multi_betas}, resampled per rollout")
+
         for step in range(1, TRAIN_STEPS+1):
-            # β bandit phase switching
+            # β bandit phase switching (3-phase A/B/winner)
+            _target_beta = None
             if _bandit_on:
                 if step <= 15000:
                     _target_beta = _bandit_init_beta; _phase = "A"
@@ -944,7 +983,21 @@ def main():
                         log(f"  [β Bandit] Phase A avg={_mean_A:.1f}, B avg={_mean_B:.1f} "
                             f"→ committing β={_winner_beta:.2f} for phase C")
                     _target_beta = _winner_beta; _phase = "C"
-                # Update corrected.beta respecting decouple flags
+
+            # EXP3: β_idx already selected by eval callback; use it
+            if _exp3_on:
+                _target_beta = _exp3_betas[_exp3_idx]
+
+            # Hill climb: β adjusted at eval based on trend
+            if _hc_on:
+                _target_beta = _hc_beta
+
+            # Multi-β: resample uniformly per step (rollout sees mixture)
+            if _multi_on:
+                _target_beta = float(np.random.choice(_multi_betas))
+
+            # Apply β respecting decouple flags
+            if _target_beta is not None:
                 if args.adapt_only_qdelta:
                     corrected.beta_qdelta = _target_beta
                 elif args.adapt_only_delta:
@@ -1096,6 +1149,34 @@ def main():
                 # exploration phases A and B; phase C is the commit phase).
                 if _bandit_on and step <= 30000 and _phase in ("A", "B"):
                     _bandit_rewards[_phase].append(float(ret))
+
+                # EXP3: update weights for current arm, resample for next interval
+                if _exp3_on:
+                    _exp3_r_max = max(_exp3_r_max, abs(float(ret)))
+                    _r_norm = float(np.clip(ret / _exp3_r_max, -1.0, 1.0))
+                    _loss = 1.0 - (_r_norm + 1.0) / 2.0  # map [-1,1] → [0,1]
+                    _probs = np.exp(_exp3_log_w - np.max(_exp3_log_w))
+                    _probs /= _probs.sum()
+                    _exp3_log_w[_exp3_idx] -= _exp3_eta * _loss / max(_probs[_exp3_idx], 0.05)
+                    _probs = np.exp(_exp3_log_w - np.max(_exp3_log_w))
+                    _probs /= _probs.sum()
+                    _exp3_idx = int(np.random.choice(len(_exp3_betas), p=_probs))
+                    log(f"  [EXP3] r={ret:.1f} loss={_loss:.2f} "
+                        f"probs={np.round(_probs, 2).tolist()} "
+                        f"next β={_exp3_betas[_exp3_idx]:.2f}")
+
+                # Hill climb: every 3 evals, adjust β based on trend
+                if _hc_on:
+                    _hc_hist.append(float(ret))
+                    if len(_hc_hist) >= 2 * _hc_win:
+                        _recent = float(np.mean(_hc_hist[-_hc_win:]))
+                        _older = float(np.mean(_hc_hist[-2*_hc_win:-_hc_win]))
+                        if _recent <= _older:
+                            _hc_direction = -_hc_direction  # reverse if not improving
+                        _new_hc_beta = float(np.clip(_hc_beta + _hc_direction * _hc_step, 0.1, 1.0))
+                        log(f"  [Hillclimb] recent={_recent:.1f} older={_older:.1f} "
+                            f"dir={_hc_direction:+d} β {_hc_beta:.2f}→{_new_hc_beta:.2f}")
+                        _hc_beta = _new_hc_beta
                 # Feed violation trend + training state + QΔ weight distribution
                 # to constraint_sys so Role #3 can tell "measurement artifact"
                 # from true Type 2 OOD.
