@@ -299,9 +299,10 @@ class CorrectedWorldModel:
     Generates imagined rollouts from the corrected model.
     """
 
-    def __init__(self, world_model, residual):
+    def __init__(self, world_model, residual, beta=1.0):
         self.wm = world_model
         self.residual = residual
+        self.beta = float(beta)
 
     def predict(self, states, actions, deterministic=False):
         """
@@ -313,8 +314,8 @@ class CorrectedWorldModel:
         next_s_sim, r_sim = self.wm.predict(states, actions, deterministic)
         if self.residual._trained:
             ds_corr, dr_corr = self.residual.predict_correction(states, actions)
-            next_s_real = next_s_sim + ds_corr
-            r_real = r_sim + dr_corr
+            next_s_real = next_s_sim + self.beta * ds_corr
+            r_real = r_sim + self.beta * dr_corr
             return next_s_real, r_real
         return next_s_sim, r_sim
 

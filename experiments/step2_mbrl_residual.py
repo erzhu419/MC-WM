@@ -258,6 +258,17 @@ def main():
     parser.add_argument("--role5_viol_hard_cap", type=float, default=30.0,
                         help="Role #5 Pareto gate: violation threshold above which "
                              "reward-seeking HP increases are blocked (viol/ep).")
+    parser.add_argument("--adaptive_beta", action="store_true",
+                        help="Scale residual correction and QΔ filtering by a "
+                             "β ∈ [0,1] computed from sim→real gap size. "
+                             "Small gap (carpet) → β→0 (degrades to c1); "
+                             "large gap (gravity) → β→1 (full c9 behavior). "
+                             "Port of BAPR-HRO dynamic-β idea.")
+    parser.add_argument("--adaptive_beta_center", type=float, default=3.5,
+                        help="Gap ratio at which β=0.5. Default 3.5 places carpet "
+                             "(gap≈2.3) at β≈0.15 and gravity (gap≈5) at β≈0.88.")
+    parser.add_argument("--adaptive_beta_scale", type=float, default=0.7,
+                        help="Sigmoid steepness for adaptive β. Smaller = sharper cutoff.")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -758,6 +769,21 @@ def main():
         direct_rmse = np.sqrt(np.mean((ns_sim_pred[:2000] - s2_real[:2000]) ** 2))
         r_corr_rmse = np.sqrt(np.mean((r_corr - r_real[:2000]) ** 2))
         r_sim_rmse = np.sqrt(np.mean((r_sim_pred[:2000] - r_real[:2000]) ** 2))
+
+        # Adaptive β: port of BAPR-HRO dynamic-β — scale residual trust by gap size.
+        # Small sim-real gap (carpet: ratio≈2.3) → β≈0 (residual adds noise).
+        # Large gap (gravity: ratio≈5) → β≈1 (full correction needed).
+        gap_ratio = direct_rmse / max(corr_rmse, 1e-6)
+        if args.adaptive_beta:
+            _beta = 1.0 / (1.0 + np.exp(-(gap_ratio - args.adaptive_beta_center)
+                                          / args.adaptive_beta_scale))
+            corrected.beta = float(_beta)
+            log(f"  [Adaptive β] gap_ratio={gap_ratio:.2f} (center={args.adaptive_beta_center}, "
+                f"scale={args.adaptive_beta_scale}) → β={_beta:.3f}")
+        else:
+            _beta = 1.0
+            log(f"  [β] gap_ratio={gap_ratio:.2f}, β=1.000 (fixed)")
+
         log(f"  State: M_sim→real RMSE={direct_rmse:.4f} → M_real RMSE={corr_rmse:.4f} "
             f"({(1-corr_rmse/direct_rmse)*100:.1f}% improvement)")
         log(f"  Reward: M_sim→real RMSE={r_sim_rmse:.4f} → M_real RMSE={r_corr_rmse:.4f} "
@@ -905,6 +931,11 @@ def main():
                             # Legacy per-step weight (γ=0): 1/(1+MSE/τ)
                             tau_s = float(np.median(per_s_err)) + 1e-8
                             w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
+
+                        # Adaptive β: blend QΔ filter toward uniform when gap is small.
+                        # β=1 → full QΔ filtering (c9); β=0 → uniform weights (≈c1).
+                        if corrected.beta < 1.0:
+                            w_qdelta = corrected.beta * w_qdelta + (1.0 - corrected.beta)
 
                         # Stacked filters: each module contributes independently.
                         # Final weight = w_qdelta × w_icrl × constraint_mask.
