@@ -30,6 +30,7 @@ from mc_wm.policy.qdelta_bellman import QDeltaBellman
 from mc_wm.residual.world_model import WorldModelEnsemble, ResidualAdapter, CorrectedWorldModel
 from mc_wm.residual.sindy_nau_adapter import SINDyNAUAdapter
 from mc_wm.residual.kan_adapter import KANResidualAdapter
+from mc_wm.residual.sindy_ensemble import SINDyEnsembleCorrector
 from mc_wm.self_audit.claude_cli_oracle import ClaudeCLIOracle
 from mc_wm.self_audit.hp_orchestrator import HPOrchestrator
 from mc_wm.self_audit.constraint_system import ConstraintSystem
@@ -302,6 +303,16 @@ def main():
                         help="Comma-separated β values, e.g. '0.3,0.6,1.0'. At each "
                              "rollout, pick β uniformly at random from grid so agent "
                              "sees rollouts from multiple correction strengths.")
+    parser.add_argument("--use_sindy_ensemble", action="store_true",
+                        help="Fit a K=5 bootstrap SINDy ensemble alongside the main "
+                             "residual; use per-sample ensemble disagreement as a "
+                             "confidence gate multiplying δ. High disagreement → gate "
+                             "closes → residual not trusted on that state-action.")
+    parser.add_argument("--sindy_ensemble_K", type=int, default=5,
+                        help="Number of bootstrap SINDy members (default 5).")
+    parser.add_argument("--sindy_ensemble_tau", type=float, default=0.1,
+                        help="Gate softness: gate=1/(1+disagreement/tau). Smaller tau "
+                             "= sharper cutoff (more samples get gated off).")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -794,7 +805,26 @@ def main():
                      n_epochs=100, patience=20,
                      real_dones=None if NO_DONE_HEAD else d_real)
 
-        corrected = CorrectedWorldModel(wm_sim, residual)
+        # Optional SINDy ensemble: per-sample confidence gate from disagreement.
+        # Trained on the same (SA, Δs) pairs used for the residual.
+        ensemble_corrector = None
+        if args.use_sindy_ensemble:
+            log(f"  Training SINDy ensemble (K={args.sindy_ensemble_K}) "
+                f"for per-sample confidence gate (tau={args.sindy_ensemble_tau})...")
+            _ds_real = s2_real - ns_sim_pred  # target = real − sim
+            _sa_real = np.concatenate([s_real, a_real], axis=-1)
+            ensemble_corrector = SINDyEnsembleCorrector(
+                obs_dim=obs_dim, K=args.sindy_ensemble_K,
+                gate_tau=args.sindy_ensemble_tau,
+            )
+            ensemble_corrector.fit(_sa_real, _ds_real)
+            # Diagnostic: gate distribution on validation data
+            _, _, _gate_val = ensemble_corrector.predict_batch_with_uncertainty(_sa_real[:2000])
+            log(f"  Ensemble gate stats: mean={_gate_val.mean():.3f}, "
+                f"min={_gate_val.min():.3f}, max={_gate_val.max():.3f}, "
+                f"frac>0.5={(_gate_val > 0.5).mean()*100:.1f}%")
+
+        corrected = CorrectedWorldModel(wm_sim, residual, ensemble_gate=ensemble_corrector)
 
         # Validate state + reward correction
         ns_corr, r_corr = corrected.predict(s_real[:2000], a_real[:2000], deterministic=True)
@@ -1023,7 +1053,14 @@ def main():
                             env_buf.s2[idx_fit], env_buf.r[idx_fit].squeeze(),
                             n_epochs=50, patience=15,
                             real_dones=None if NO_DONE_HEAD else env_buf.d[idx_fit].squeeze())
-                corrected = CorrectedWorldModel(wm_sim, residual)
+                # Preserve β + ensemble gate across refit (refit does not retrain ensemble)
+                _prev_bd = corrected.beta_delta
+                _prev_bq = corrected.beta_qdelta
+                _prev_gate = corrected.ensemble_gate
+                corrected = CorrectedWorldModel(
+                    wm_sim, residual,
+                    beta_delta=_prev_bd, beta_qdelta=_prev_bq,
+                    ensemble_gate=_prev_gate)
                 model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
                 # TD update for Bellman QΔ critic on real transitions

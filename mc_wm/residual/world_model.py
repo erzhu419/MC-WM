@@ -300,7 +300,8 @@ class CorrectedWorldModel:
     """
 
     def __init__(self, world_model, residual, beta=1.0,
-                 beta_delta=None, beta_qdelta=None):
+                 beta_delta=None, beta_qdelta=None,
+                 ensemble_gate=None):
         self.wm = world_model
         self.residual = residual
         # Decoupled β: beta_delta scales residual correction in predict();
@@ -308,6 +309,10 @@ class CorrectedWorldModel:
         # Setting `corrected.beta = X` still sets both (backward compat).
         self._beta_delta = float(beta if beta_delta is None else beta_delta)
         self._beta_qdelta = float(beta if beta_qdelta is None else beta_qdelta)
+        # SINDy ensemble: per-sample OOD gate that multiplies δ.
+        # High ensemble agreement → gate≈1 (trust correction); disagreement
+        # → gate→0 (the residual is extrapolating; rollout with raw sim).
+        self.ensemble_gate = ensemble_gate
 
     @property
     def beta(self):
@@ -345,6 +350,15 @@ class CorrectedWorldModel:
         next_s_sim, r_sim = self.wm.predict(states, actions, deterministic)
         if self.residual._trained:
             ds_corr, dr_corr = self.residual.predict_correction(states, actions)
+            # Per-sample ensemble gate (broadcasted across obs dims and reward)
+            if self.ensemble_gate is not None:
+                import numpy as _np
+                _sa = _np.concatenate(
+                    [_np.asarray(states), _np.asarray(actions)], axis=-1)
+                _, _, gates = self.ensemble_gate.predict_batch_with_uncertainty(_sa)
+                # gates: shape (N,); broadcast to (N,1) for ds_corr
+                ds_corr = ds_corr * gates[:, None]
+                dr_corr = dr_corr * gates
             next_s_real = next_s_sim + self._beta_delta * ds_corr
             r_real = r_sim + self._beta_delta * dr_corr
             return next_s_real, r_real
