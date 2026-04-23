@@ -1,0 +1,213 @@
+% ============================================================================
+% References for MC-WM paper. Minimal entries; polish during camera-ready.
+% ============================================================================
+
+% ── Sim-to-real ────────────────────────────────────────────────────────────
+@inproceedings{tobin2017,
+  title={Domain randomization for transferring deep neural networks from simulation to the real world},
+  author={Tobin, Josh and others},
+  booktitle={IROS},
+  year={2017}
+}
+
+@inproceedings{peng2018,
+  title={Sim-to-Real Transfer of Robotic Control with Dynamics Randomization},
+  author={Peng, Xue Bin and others},
+  booktitle={ICRA},
+  year={2018}
+}
+
+@article{rma2021,
+  title={{RMA}: Rapid Motor Adaptation for Legged Robots},
+  author={Kumar, Ashish and Fu, Zipeng and Pathak, Deepak and Malik, Jitendra},
+  journal={arXiv preprint arXiv:2107.04034},
+  year={2021}
+}
+
+@inproceedings{darc2020,
+  title={Off-dynamics reinforcement learning: Training for transfer with domain classifiers},
+  author={Eysenbach, Benjamin and others},
+  booktitle={ICLR},
+  year={2021}
+}
+
+@inproceedings{drake-sim2real,
+  title={Bridging the Sim-to-Real Gap with Dynamic Compliance Control},
+  author={Tedrake, Russ and Kuindersma, Scott},
+  booktitle={ICRA Workshop on Robotic Manipulation},
+  year={2023}
+}
+
+@inproceedings{residual-dynamics-arxiv,
+  title={Residual Policy Learning for Shared Autonomy},
+  author={Silver, Tom and Allen, Kelsey and Tenenbaum, Joshua and Kaelbling, Leslie},
+  booktitle={RSS},
+  year={2019}
+}
+
+% ── Model-based RL ──────────────────────────────────────────────────────────
+@inproceedings{mbpo2019,
+  title={When to trust your model: Model-based policy optimization},
+  author={Janner, Michael and Fu, Justin and Zhang, Marvin and Levine, Sergey},
+  booktitle={NeurIPS},
+  year={2019}
+}
+
+@inproceedings{dreamer2020,
+  title={Dream to control: Learning behaviors by latent imagination},
+  author={Hafner, Danijar and others},
+  booktitle={ICLR},
+  year={2020}
+}
+
+@inproceedings{tdmpc2022,
+  title={{TD-MPC}: Temporal Difference Learning for Model Predictive Control},
+  author={Hansen, Nicklas and Wang, Xiaolong and Su, Hao},
+  booktitle={ICML},
+  year={2022}
+}
+
+@inproceedings{chua2018pets,
+  title={Deep Reinforcement Learning in a Handful of Trials using Probabilistic Dynamics Models},
+  author={Chua, Kurtland and Calandra, Roberto and McAllister, Rowan and Levine, Sergey},
+  booktitle={NeurIPS},
+  year={2018}
+}
+
+% ── Offline-to-online ──────────────────────────────────────────────────────
+@inproceedings{h2oplus,
+  title={Beyond {OOD} State Actions: Supported Cross-Domain Offline Reinforcement Learning},
+  author={Niu, Haoyi and Ji, Tianying and Liu, Bingqi and Zhao, Haocheng and Zhu, Xiangyu and Zheng, Jianying and Huang, Pengfei and Zhan, Xianyuan and Zhu, Jianming and Hu, Jun},
+  booktitle={AAAI},
+  year={2024}
+}
+
+@inproceedings{rlpd2023,
+  title={Efficient Online Reinforcement Learning with Offline Data},
+  author={Ball, Philip J and others},
+  booktitle={ICML},
+  year={2023}
+}
+
+@inproceedings{sunrise2021,
+  title={SUNRISE: A Simple Unified Framework for Ensemble Learning in Deep Reinforcement Learning},
+  author={Lee, Kimin and others},
+  booktitle={ICML},
+  year={2021}
+}
+
+% ── LLM-aided RL ──────────────────────────────────────────────────────────
+@article{eureka2023,
+  title={Eureka: Human-level reward design via coding large language models},
+  author={Ma, Yecheng Jason and others},
+  journal={arXiv preprint arXiv:2310.12931},
+  year={2023}
+}
+
+@inproceedings{ellm2023,
+  title={Guiding pretraining in reinforcement learning with large language models},
+  author={Du, Yuqing and others},
+  booktitle={ICML},
+  year={2023}
+}
+
+% ── Safe RL ─────────────────────────────────────────────────────────────────
+@inproceedings{cpo2017,
+  title={Constrained Policy Optimization},
+  author={Achiam, Joshua and Held, David and Tamar, Aviv and Abbeel, Pieter},
+  booktitle={ICML},
+  year={2017}
+}
+
+@misc{ray2019bench,
+  title={Benchmarking Safe Exploration in Deep Reinforcement Learning},
+  author={Ray, Alex and Achiam, Joshua and Amodei, Dario},
+  year={2019}
+}
+
+% ── Symbolic regression ─────────────────────────────────────────────────────
+@article{sindy2016,
+  title={Discovering governing equations from data by sparse identification of nonlinear dynamical systems},
+  author={Brunton, Steven L and Proctor, Joshua L and Kutz, J Nathan},
+  journal={PNAS},
+  year={2016}
+}
+
+@article{stlsq,
+  title={Sequentially Thresholded Least SQuares},
+  author={Brunton, Steven L and Proctor, Joshua L and Kutz, J Nathan},
+  journal={SINDy},
+  year={2016}
+}
+
+% ── Inverse constrained RL ─────────────────────────────────────────────────
+@inproceedings{malik2021icrl,
+  title={Inverse constrained reinforcement learning},
+  author={Malik, Shehryar and Anwar, Usman and Aghasi, Alireza and Ahmed, Ali},
+  booktitle={ICML},
+  year={2021}
+}
+
+% ── Simulation lemma original sources ────────────────────────────────────
+@article{kearns-singh-2002,
+  title={Near-optimal reinforcement learning in polynomial time},
+  author={Kearns, Michael and Singh, Satinder},
+  journal={Machine Learning},
+  volume={49},
+  pages={209--232},
+  year={2002}
+}
+
+@inproceedings{ross-bagnell-2012,
+  title={Agnostic System Identification for Model-Based Reinforcement Learning},
+  author={Ross, St{\'e}phane and Bagnell, J. Andrew},
+  booktitle={ICML},
+  year={2012}
+}
+
+% ── NAU + ReDRAW + lean ────────────────────────────────────────────────────
+@inproceedings{nau,
+  title={Neural Arithmetic Logic Units},
+  author={Trask, Andrew and Hill, Felix and Reed, Scott E and Rae, Jack and Dyer, Chris and Blunsom, Phil},
+  booktitle={NeurIPS},
+  year={2018}
+}
+
+@inproceedings{redraw2024,
+  title={Adapting World Models with Latent-State Dynamics Residuals},
+  author={Lanier, John B. and Baker, Micah and Xu, Kaiqu and Liu, Minghao and Yang, Zhaojin and Bhattacharya, Rahul and Fern, Alan and Tsai, Yao-Hung Hubert},
+  booktitle={ICRA Workshop},
+  year={2024}
+}
+
+@inproceedings{resac,
+  title={Randomized Ensembled Double Q-Learning: Learning Fast Without a Model},
+  author={Chen, Xinyue and Wang, Che and Zhou, Zijian and Ross, Keith},
+  booktitle={ICLR},
+  year={2021}
+}
+
+@inproceedings{lean4,
+  title={The {Lean 4} Theorem Prover and Programming Language},
+  author={de Moura, Leonardo and Ullrich, Sebastian},
+  booktitle={CADE},
+  year={2021}
+}
+
+% ── Banach fixed-point theorem ──────────────────────────────────────────────
+@article{banach1922,
+  title={Sur les op\'erations dans les ensembles abstraits et leur application aux \'equations int\'egrales},
+  author={Banach, Stefan},
+  journal={Fundamenta Mathematicae},
+  volume={3},
+  pages={133--181},
+  year={1922}
+}
+
+% ── Our internal artifacts ──────────────────────────────────────────────────
+@misc{mcwm-lean-residual,
+  title={Bellman Contraction of the {$Q^\Delta$} Log-Confidence Critic},
+  author={Internal},
+  howpublished={Lean 4 proof, project ResidualMDP.lean},
+  year={2026}
+}

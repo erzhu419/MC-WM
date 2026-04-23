@@ -1,0 +1,204 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{tobin2017,rma2021,drake-sim2real}
+\citation{tobin2017,peng2018}
+\citation{rlpd2023,h2oplus}
+\citation{darc2020,rma2021}
+\citation{sindy2016}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\citation{mbpo2019}
+\citation{dreamer2020}
+\citation{tdmpc2022}
+\citation{chua2018pets}
+\citation{darc2020}
+\citation{rma2021}
+\citation{redraw2024}
+\citation{h2oplus}
+\citation{rlpd2023}
+\citation{sunrise2021}
+\@writefile{toc}{\contentsline {paragraph}{Why the method's applicability is not universal.}{2}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Contributions.}{2}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:related}{{2}{2}{Related Work}{section.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Simulation-based MBRL.}{2}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Sim-to-Real and Dynamics Adaptation.}{2}{section*.5}\protected@file@percent }
+\citation{eureka2023}
+\citation{ellm2023}
+\citation{cpo2017}
+\citation{ray2019bench}
+\citation{kearns-singh-2002}
+\citation{ross-bagnell-2012}
+\citation{mbpo2019}
+\citation{mbpo2019}
+\citation{resac}
+\citation{sindy2016}
+\citation{nau}
+\@writefile{toc}{\contentsline {paragraph}{Offline-to-Online RL.}{3}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{LLM-Aided RL.}{3}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Safe Model-Based RL.}{3}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Simulation lemmas and Bellman contraction.}{3}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Preliminaries}{3}{section.3}\protected@file@percent }
+\newlabel{sec:prelim}{{3}{3}{Preliminaries}{section.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Residual decomposition.}{3}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{MBPO backbone.}{3}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Method: MC-WM}{3}{section.4}\protected@file@percent }
+\newlabel{sec:method}{{4}{3}{Method: MC-WM}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}SINDy\,+\,NAU Residual Adapter}{3}{subsection.4.1}\protected@file@percent }
+\newlabel{sec:method-residual}{{4.1}{3}{SINDy\,+\,NAU Residual Adapter}{subsection.4.1}{}}
+\newlabel{eq:residual}{{1}{3}{SINDy\,+\,NAU Residual Adapter}{equation.4.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {MC-WM pipeline.} Sim and real transitions feed a frozen ensemble world model $\hat  M_{\mathrm  {sim}}$ and a SINDy\,+\,NAU residual $\hat  \delta $. Imagined rollouts from $\hat  M_{\mathrm  {sim}}+\hat  \delta $ are gated by a Bellman $Q^{\Delta }$ critic and a constraint system before being added to the policy replay buffer. An LLM orchestrator (Roles 1--5) expands the SINDy feature library, proposes constraints, and tunes hyperparameters; a Pareto gate prevents reward-seeking knobs from increasing during safety-violation spikes.\relax }}{4}{figure.caption.12}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:arch}{{1}{4}{\textbf {MC-WM pipeline.} Sim and real transitions feed a frozen ensemble world model $\hat M_{\mathrm {sim}}$ and a SINDy\,+\,NAU residual $\hat \delta $. Imagined rollouts from $\hat M_{\mathrm {sim}}+\hat \delta $ are gated by a Bellman $\QD $ critic and a constraint system before being added to the policy replay buffer. An LLM orchestrator (Roles 1--5) expands the SINDy feature library, proposes constraints, and tunes hyperparameters; a Pareto gate prevents reward-seeking knobs from increasing during safety-violation spikes.\relax }{figure.caption.12}{}}
+\@writefile{toc}{\contentsline {paragraph}{Sparsity-adaptive threshold.}{4}{section*.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Safety-Aware Rollout Filter}{4}{subsection.4.2}\protected@file@percent }
+\newlabel{sec:method-safety}{{4.2}{4}{Safety-Aware Rollout Filter}{subsection.4.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Bellman $Q^{\Delta }$ critic.}{4}{section*.14}\protected@file@percent }
+\newlabel{eq:qdelta-target}{{2}{4}{Bellman $\QD $ critic}{equation.4.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Constraint system.}{4}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Combined weight.}{4}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}LLM Orchestrator and Pareto Gate}{4}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:method-orch}{{4.3}{4}{LLM Orchestrator and Pareto Gate}{subsection.4.3}{}}
+\citation{kearns-singh-2002,ross-bagnell-2012}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces MC-WM: Model-Corrected World Model\relax }}{5}{algorithm.1}\protected@file@percent }
+\newlabel{alg:mcwm}{{1}{5}{MC-WM: Model-Corrected World Model\relax }{algorithm.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Pareto gate.}{5}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Training Algorithm}{5}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:method-algo}{{4.4}{5}{Training Algorithm}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Theoretical Analysis}{5}{section.5}\protected@file@percent }
+\newlabel{sec:theory}{{5}{5}{Theoretical Analysis}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Policy-Conditional Value Gap (main theorem)}{6}{subsection.5.1}\protected@file@percent }
+\newlabel{thm:simulation}{{3}{6}{Residual Simulation Lemma}{theorem.3}{}}
+\newlabel{eq:simulation}{{3}{6}{Residual Simulation Lemma}{equation.5.3}{}}
+\newlabel{thm:policy-cond-conv}{{4}{6}{Policy-conditional convergence}{theorem.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Universal convergence is false}{6}{subsection.5.2}\protected@file@percent }
+\newlabel{thm:universal-false}{{5}{6}{No uniform convergence over all policies}{theorem.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Design implication.}{6}{section*.18}\protected@file@percent }
+\citation{malik2021icrl}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Convergence of Online Refit}{7}{subsection.5.3}\protected@file@percent }
+\newlabel{sec:refit}{{5.3}{7}{Convergence of Online Refit}{subsection.5.3}{}}
+\newlabel{assm:refit-lip}{{1}{7}{Composed Lipschitz refit}{assumption.1}{}}
+\newlabel{thm:refit-contraction}{{6}{7}{Refit Contraction}{theorem.6}{}}
+\newlabel{cor:joint}{{7}{7}{Policy-conditional residual MDP convergence under online refit}{theorem.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Practical remark.}{7}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}ELBO-style equivalence of $Q^{\Delta }$ and ICRL discriminator}{7}{subsection.5.4}\protected@file@percent }
+\newlabel{assm:gaussian}{{2}{7}{Gaussian residual}{assumption.2}{}}
+\newlabel{thm:qdelta-icrl}{{8}{7}{Rank equivalence under uniform residual fit}{theorem.8}{}}
+\citation{mbpo2019}
+\citation{h2oplus}
+\@writefile{toc}{\contentsline {paragraph}{When the two signals differ.}{8}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Experiments}{8}{section.6}\protected@file@percent }
+\newlabel{sec:exp}{{6}{8}{Experiments}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Environments and Baselines}{8}{subsection.6.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Benchmark environments. The \emph  {gap} column reports the residual improvement $(\mathrm  {RMSE}_{\mathrm  {sim}\to \mathrm  {real}}-\mathrm  {RMSE}_{\mathrm  {real}})/\mathrm  {RMSE}_{\mathrm  {sim}\to \mathrm  {real}}$ on held-out Phase\nobreakspace  {}1b data; larger values indicate a larger physical-dynamics shift (see Section\nobreakspace  {}\ref  {sec:taxonomy}).\relax }}{8}{table.caption.21}\protected@file@percent }
+\newlabel{tab:envs}{{1}{8}{Benchmark environments. The \emph {gap} column reports the residual improvement $(\mathrm {RMSE}_{\mathrm {sim}\to \mathrm {real}}-\mathrm {RMSE}_{\mathrm {real}})/\mathrm {RMSE}_{\mathrm {sim}\to \mathrm {real}}$ on held-out Phase~1b data; larger values indicate a larger physical-dynamics shift (see Section~\ref {sec:taxonomy}).\relax }{table.caption.21}{}}
+\@writefile{toc}{\contentsline {paragraph}{Baselines.}{8}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Main Results}{8}{subsection.6.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Main results (3 seeds, $50$k real-env steps; return and violations per episode). Our method matches or approaches oracle c4 on large-gap environments while massively outperforming naive sim transfer (c1).\relax }}{9}{table.caption.23}\protected@file@percent }
+\newlabel{tab:main}{{2}{9}{Main results (3 seeds, $50$k real-env steps; return and violations per episode). Our method matches or approaches oracle c4 on large-gap environments while massively outperforming naive sim transfer (c1).\relax }{table.caption.23}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \textbf  {Training curves} (mean $\pm $ standard deviation over $n$ seeds) on the three main environments. Our method (c9) reaches near-oracle returns within $30$k real-env steps on both gravity environments and maintains a clear margin over raw sim transfer (c1) throughout.\relax }}{9}{figure.caption.24}\protected@file@percent }
+\newlabel{fig:curves}{{2}{9}{\textbf {Training curves} (mean $\pm $ standard deviation over $n$ seeds) on the three main environments. Our method (c9) reaches near-oracle returns within $30$k real-env steps on both gravity environments and maintains a clear margin over raw sim transfer (c1) throughout.\relax }{figure.caption.24}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}H2O+ Baseline: Offline Lower Bound and Data Dependence}{9}{subsection.6.3}\protected@file@percent }
+\newlabel{sec:h2o_analysis}{{6.3}{9}{H2O+ Baseline: Offline Lower Bound and Data Dependence}{subsection.6.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces H2O+ decomposition on \texttt  {gravity\_soft\_ceiling} (3 seeds, mean shown; $50$k real-env steps except ``offline-only'' which uses D4RL medium-replay + $1024$-step sim warm-up). Offline-only is a clear lower bound; full H2O+ ($r=1.0$) improves dramatically with more offline data; pure online SAC falls well short of both H2O+ and our MC-WM.\relax }}{9}{table.caption.25}\protected@file@percent }
+\newlabel{tab:h2o_decomp}{{3}{9}{H2O+ decomposition on \texttt {gravity\_soft\_ceiling} (3 seeds, mean shown; $50$k real-env steps except ``offline-only'' which uses D4RL medium-replay + $1024$-step sim warm-up). Offline-only is a clear lower bound; full H2O+ ($r=1.0$) improves dramatically with more offline data; pure online SAC falls well short of both H2O+ and our MC-WM.\relax }{table.caption.25}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Ablation Study}{10}{subsection.6.4}\protected@file@percent }
+\newlabel{sec:ablation}{{6.4}{10}{Ablation Study}{subsection.6.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \textbf  {Ablation of MC-WM components} on \texttt  {gravity\_soft\_ceiling} (seed 42, full-c9 baseline $6611$). Removing the Bellman $Q^{\Delta }$ critic causes the largest violation increase ($7\times $), whereas removing the LLM causes the largest reward drop ($-18\%$). See Table\nobreakspace  {}\ref  {tab:ablation} for numerical values.\relax }}{10}{figure.caption.26}\protected@file@percent }
+\newlabel{fig:ablation}{{3}{10}{\textbf {Ablation of MC-WM components} on \texttt {gravity\_soft\_ceiling} (seed 42, full-c9 baseline $6611$). Removing the Bellman $\QD $ critic causes the largest violation increase ($7\times $), whereas removing the LLM causes the largest reward drop ($-18\%$). See Table~\ref {tab:ablation} for numerical values.\relax }{figure.caption.26}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Ablation of MC-WM components on \texttt  {gravity\_soft\_ceiling s42}.\relax }}{10}{table.caption.27}\protected@file@percent }
+\newlabel{tab:ablation}{{4}{10}{Ablation of MC-WM components on \texttt {gravity\_soft\_ceiling s42}.\relax }{table.caption.27}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}When Residual Correction Fails: Negative Results and Gap Taxonomy}{10}{subsection.6.5}\protected@file@percent }
+\newlabel{sec:taxonomy}{{6.5}{10}{When Residual Correction Fails: Negative Results and Gap Taxonomy}{subsection.6.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces \textbf  {Environments where MC-WM hurts.} Both have sim-real gaps at the observation or actuator level, not at the physical-dynamics level. c9 means over 3 seeds. Appendix\nobreakspace  {}\ref  {app:beta} reports a follow-up $\beta $-scaling study that also failed, confirming that the issue is structural (Thm.\nobreakspace  {}\ref  {thm:universal-false}), not a scalar mis-calibration.\relax }}{11}{table.caption.28}\protected@file@percent }
+\newlabel{tab:neg}{{5}{11}{\textbf {Environments where MC-WM hurts.} Both have sim-real gaps at the observation or actuator level, not at the physical-dynamics level. c9 means over 3 seeds. Appendix~\ref {app:beta} reports a follow-up $\beta $-scaling study that also failed, confirming that the issue is structural (Thm.~\ref {thm:universal-false}), not a scalar mis-calibration.\relax }{table.caption.28}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \textbf  {Gap taxonomy.} $c9/c1$ return ratio vs.\ residual improvement ratio on real data. Residual correction is effective iff the gap exceeds $\sim 35\%$. Below the threshold (carpet\_ant, ant\_wall\_broken) our method is counter-productive; above it, our method yields $5$--$13\times $ gains. The two negative-result environments are plotted in red.\relax }}{11}{figure.caption.29}\protected@file@percent }
+\newlabel{fig:taxonomy}{{4}{11}{\textbf {Gap taxonomy.} $c9/c1$ return ratio vs.\ residual improvement ratio on real data. Residual correction is effective iff the gap exceeds $\sim 35\%$. Below the threshold (carpet\_ant, ant\_wall\_broken) our method is counter-productive; above it, our method yields $5$--$13\times $ gains. The two negative-result environments are plotted in red.\relax }{figure.caption.29}{}}
+\@writefile{toc}{\contentsline {paragraph}{Diagnostic for practitioners.}{11}{section*.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Discussion}{11}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{What makes the method work.}{11}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Relation to formal results.}{11}{section*.32}\protected@file@percent }
+\bibstyle{plain}
+\bibdata{references}
+\bibcite{cpo2017}{{1}{}{{}}{{}}}
+\bibcite{rlpd2023}{{2}{}{{}}{{}}}
+\bibcite{banach1922}{{3}{}{{}}{{}}}
+\bibcite{sindy2016}{{4}{}{{}}{{}}}
+\bibcite{resac}{{5}{}{{}}{{}}}
+\bibcite{chua2018pets}{{6}{}{{}}{{}}}
+\bibcite{lean4}{{7}{}{{}}{{}}}
+\bibcite{ellm2023}{{8}{}{{}}{{}}}
+\bibcite{darc2020}{{9}{}{{}}{{}}}
+\bibcite{dreamer2020}{{10}{}{{}}{{}}}
+\@writefile{toc}{\contentsline {paragraph}{Limitations.}{12}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Broader Impact.}{12}{section*.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Conclusion}{12}{section.8}\protected@file@percent }
+\bibcite{tdmpc2022}{{11}{}{{}}{{}}}
+\bibcite{mbpo2019}{{12}{}{{}}{{}}}
+\bibcite{kearns-singh-2002}{{13}{}{{}}{{}}}
+\bibcite{rma2021}{{14}{}{{}}{{}}}
+\bibcite{redraw2024}{{15}{}{{}}{{}}}
+\bibcite{sunrise2021}{{16}{}{{}}{{}}}
+\bibcite{eureka2023}{{17}{}{{}}{{}}}
+\bibcite{malik2021icrl}{{18}{}{{}}{{}}}
+\bibcite{h2oplus}{{19}{}{{}}{{}}}
+\bibcite{peng2018}{{20}{}{{}}{{}}}
+\bibcite{ray2019bench}{{21}{}{{}}{{}}}
+\bibcite{ross-bagnell-2012}{{22}{}{{}}{{}}}
+\bibcite{drake-sim2real}{{23}{}{{}}{{}}}
+\bibcite{tobin2017}{{24}{}{{}}{{}}}
+\bibcite{nau}{{25}{}{{}}{{}}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Implementation Details}{13}{appendix.A}\protected@file@percent }
+\newlabel{app:impl}{{A}{13}{Implementation Details}{appendix.A}{}}
+\@writefile{toc}{\contentsline {paragraph}{Compute.}{13}{section*.36}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hyperparameters.}{14}{section*.37}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{LLM cost.}{14}{section*.38}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Reproducibility.}{14}{section*.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {B}Full Per-Seed Tables}{14}{appendix.B}\protected@file@percent }
+\newlabel{app:seeds}{{B}{14}{Full Per-Seed Tables}{appendix.B}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Per-seed results. Values are the last-3-evaluation mean of eval return and mean violations/episode.\relax }}{14}{table.caption.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {C}LLM Prompts}{15}{appendix.C}\protected@file@percent }
+\newlabel{app:prompts}{{C}{15}{LLM Prompts}{appendix.C}{}}
+\@writefile{toc}{\contentsline {paragraph}{Role \#1 (Constraint proposer).}{15}{section*.41}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Role \#2 (Feature proposer).}{15}{section*.42}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Role \#3 (Audit).}{15}{section*.43}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Role \#4 (ICRL $\varphi ^*$ comparator, diagnostic).}{15}{section*.44}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Role \#5 (HP orchestrator).}{15}{section*.45}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {D}Additional Detail on Negative Results}{15}{appendix.D}\protected@file@percent }
+\newlabel{app:neg}{{D}{15}{Additional Detail on Negative Results}{appendix.D}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {E}$\beta $-Scaling Adaptation Experiments (Failed)}{15}{appendix.E}\protected@file@percent }
+\newlabel{app:beta}{{E}{15}{$\beta $-Scaling Adaptation Experiments (Failed)}{appendix.E}{}}
+\citation{lean4}
+\@writefile{toc}{\contentsline {section}{\numberline {F}Proofs}{16}{appendix.F}\protected@file@percent }
+\newlabel{app:lean}{{F}{16}{Proofs}{appendix.F}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {F.1}Full proof of Theorem\nobreakspace  {}\ref  {thm:simulation}}{16}{subsection.F.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 1 (triangle-decomposition).}{16}{section*.46}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 2 ($\qopname  \relax m{sup}$ of sum $\le $ sum of $\qopname  \relax m{sup}$).}{16}{section*.47}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 3 (bracket $B_1$ --- TV\,+\,H\"older bound).}{16}{section*.48}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 4 (bracket $B_2$ --- Bellman contraction).}{16}{section*.49}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 5 (combine).}{16}{section*.50}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Step 6 (solve).}{16}{section*.51}\protected@file@percent }
+\citation{banach1922}
+\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\@writefile{toc}{\contentsline {subsection}{\numberline {F.2}Full proof of Theorem\nobreakspace  {}\ref  {thm:universal-false}}{17}{subsection.F.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {F.3}Full proof of Theorem\nobreakspace  {}\ref  {thm:qdelta-icrl}}{17}{subsection.F.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {F.4}Full proof of Theorem\nobreakspace  {}\ref  {thm:refit-contraction}}{17}{subsection.F.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Lean axioms.}{17}{section*.52}\protected@file@percent }
+\newlabel{lem:bellman}{{9}{17}{Bellman $\gamma $-contraction}{theorem.9}{}}
+\gdef \@abspage@last{17}

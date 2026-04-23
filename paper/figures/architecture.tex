@@ -1,0 +1,77 @@
+% Standalone TikZ: compile with pdflatex architecture.tex
+% Produces architecture.pdf for inclusion in main.tex.
+\documentclass[tikz,border=8pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds,calc}
+
+\begin{document}
+\begin{tikzpicture}[
+  font=\small\sffamily,
+  node distance=4mm and 6mm,
+  box/.style={draw,rounded corners=2pt,minimum height=7mm,align=center,inner sep=3pt,fill=white},
+  env/.style={box,fill=blue!10},
+  model/.style={box,fill=green!12},
+  filter/.style={box,fill=orange!18},
+  llm/.style={box,fill=purple!12},
+  out/.style={box,fill=red!12},
+  arrow/.style={-Stealth,thick},
+  dim/.style={-Stealth,thick,gray!70!black,dashed},
+]
+
+% ── Data sources (left) ───────────────────────────────────────────────────
+\node[env] (sim) {Sim env \\ $\mathcal{M}_{\text{sim}}$};
+\node[env,below=of sim] (real) {Real env \\ $\mathcal{M}_{\text{real}}$ \\ \textit{(50k batch)}};
+
+% ── Base world model (middle-left) ────────────────────────────────────────
+\node[model,right=10mm of sim] (wm) {Ensemble WM \\ $\hat{M}_{\text{sim}}$ (K=5)};
+
+% ── Residual ──────────────────────────────────────────────────────────────
+\node[model,right=10mm of real] (res) {\textbf{Residual} $\delta_\theta$ \\
+\textsc{sindy} + \textsc{nau} head};
+
+% ── LLM orchestrator (top) ────────────────────────────────────────────────
+\node[llm,above=of wm,xshift=8mm] (llm) {\textbf{LLM Orchestrator} (Claude) \\
+Role \#1 constraints · \#2 features \\
+\#3 audit · \#5 HP + Pareto gate};
+
+% ── Corrected WM ──────────────────────────────────────────────────────────
+\node[model,right=10mm of wm,yshift=-8mm] (cwm) {Corrected WM \\
+$\hat{M}_{\text{sim}} + \delta_\theta$};
+
+% ── Rollout + filter (center) ─────────────────────────────────────────────
+\node[filter,right=12mm of cwm] (roll) {Imagined rollout \\
+$(s,a,\hat{s}',\hat{r})$};
+
+\node[filter,right=of roll] (qd) {\textbf{Bellman} $Q^\Delta$ \\ weight $w^{qd}$};
+
+\node[filter,below=of qd] (cs) {\textbf{Constraint system} \\
+physical + LLM};
+
+% ── SAC / Policy buffer ───────────────────────────────────────────────────
+\node[out,right=of qd] (buf) {Model buffer \\ (filtered rollouts)};
+\node[out,below=of buf] (sac) {SAC update \\ (LCB critic)};
+
+% ── Arrows ────────────────────────────────────────────────────────────────
+\draw[arrow] (sim) -- (wm);
+\draw[arrow] (real) -- (res);
+\draw[arrow] (wm) -- (cwm);
+\draw[arrow] (res) -- (cwm);
+
+\draw[arrow] (cwm) -- (roll);
+\draw[arrow] (roll) -- (qd);
+\draw[arrow] (roll) -- (cs);
+\draw[arrow] (qd) -- (buf) node[pos=0.5,above,font=\scriptsize]{$w = m \cdot w^{qd}$};
+\draw[arrow] (cs.east) -- ++(0.6,0) |- (buf.south);
+
+\draw[arrow] (buf) -- (sac);
+\draw[arrow] (sac.west) -- ++(-0.3,0) |- (sim.east)
+  node[pos=0.25,right,font=\scriptsize]{sim interact};
+
+% LLM modulates residual + orchestrator
+\draw[dim] (llm) -- (res) node[pos=0.6,right,font=\scriptsize]{feat. proposals};
+\draw[dim] (llm) -- (cs) node[pos=0.8,left=3pt,font=\scriptsize]{constraints};
+\draw[dim] (llm.east) -- ++(1.5,0) |- (qd.north)
+  node[pos=0.25,below=1pt,font=\scriptsize]{HP \& Pareto};
+
+\end{tikzpicture}
+\end{document}

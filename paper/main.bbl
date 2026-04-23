@@ -1,0 +1,139 @@
+\begin{thebibliography}{10}
+
+\bibitem{cpo2017}
+Joshua Achiam, David Held, Aviv Tamar, and Pieter Abbeel.
+\newblock Constrained policy optimization.
+\newblock In {\em ICML}, 2017.
+
+\bibitem{rlpd2023}
+Philip~J Ball et~al.
+\newblock Efficient online reinforcement learning with offline data.
+\newblock In {\em ICML}, 2023.
+
+\bibitem{banach1922}
+Stefan Banach.
+\newblock Sur les op\'erations dans les ensembles abstraits et leur application
+  aux \'equations int\'egrales.
+\newblock {\em Fundamenta Mathematicae}, 3:133--181, 1922.
+
+\bibitem{sindy2016}
+Steven~L Brunton, Joshua~L Proctor, and J~Nathan Kutz.
+\newblock Discovering governing equations from data by sparse identification of
+  nonlinear dynamical systems.
+\newblock {\em PNAS}, 2016.
+
+\bibitem{resac}
+Xinyue Chen, Che Wang, Zijian Zhou, and Keith Ross.
+\newblock Randomized ensembled double q-learning: Learning fast without a
+  model.
+\newblock In {\em ICLR}, 2021.
+
+\bibitem{chua2018pets}
+Kurtland Chua, Roberto Calandra, Rowan McAllister, and Sergey Levine.
+\newblock Deep reinforcement learning in a handful of trials using
+  probabilistic dynamics models.
+\newblock In {\em NeurIPS}, 2018.
+
+\bibitem{lean4}
+Leonardo de~Moura and Sebastian Ullrich.
+\newblock The {Lean 4} theorem prover and programming language.
+\newblock In {\em CADE}, 2021.
+
+\bibitem{ellm2023}
+Yuqing Du et~al.
+\newblock Guiding pretraining in reinforcement learning with large language
+  models.
+\newblock In {\em ICML}, 2023.
+
+\bibitem{darc2020}
+Benjamin Eysenbach et~al.
+\newblock Off-dynamics reinforcement learning: Training for transfer with
+  domain classifiers.
+\newblock In {\em ICLR}, 2021.
+
+\bibitem{dreamer2020}
+Danijar Hafner et~al.
+\newblock Dream to control: Learning behaviors by latent imagination.
+\newblock In {\em ICLR}, 2020.
+
+\bibitem{tdmpc2022}
+Nicklas Hansen, Xiaolong Wang, and Hao Su.
+\newblock {TD-MPC}: Temporal difference learning for model predictive control.
+\newblock In {\em ICML}, 2022.
+
+\bibitem{mbpo2019}
+Michael Janner, Justin Fu, Marvin Zhang, and Sergey Levine.
+\newblock When to trust your model: Model-based policy optimization.
+\newblock In {\em NeurIPS}, 2019.
+
+\bibitem{kearns-singh-2002}
+Michael Kearns and Satinder Singh.
+\newblock Near-optimal reinforcement learning in polynomial time.
+\newblock {\em Machine Learning}, 49:209--232, 2002.
+
+\bibitem{rma2021}
+Ashish Kumar, Zipeng Fu, Deepak Pathak, and Jitendra Malik.
+\newblock {RMA}: Rapid motor adaptation for legged robots.
+\newblock {\em arXiv preprint arXiv:2107.04034}, 2021.
+
+\bibitem{redraw2024}
+John~B. Lanier, Micah Baker, Kaiqu Xu, Minghao Liu, Zhaojin Yang, Rahul
+  Bhattacharya, Alan Fern, and Yao-Hung~Hubert Tsai.
+\newblock Adapting world models with latent-state dynamics residuals.
+\newblock In {\em ICRA Workshop}, 2024.
+
+\bibitem{sunrise2021}
+Kimin Lee et~al.
+\newblock Sunrise: A simple unified framework for ensemble learning in deep
+  reinforcement learning.
+\newblock In {\em ICML}, 2021.
+
+\bibitem{eureka2023}
+Yecheng~Jason Ma et~al.
+\newblock Eureka: Human-level reward design via coding large language models.
+\newblock {\em arXiv preprint arXiv:2310.12931}, 2023.
+
+\bibitem{malik2021icrl}
+Shehryar Malik, Usman Anwar, Alireza Aghasi, and Ali Ahmed.
+\newblock Inverse constrained reinforcement learning.
+\newblock In {\em ICML}, 2021.
+
+\bibitem{h2oplus}
+Haoyi Niu, Tianying Ji, Bingqi Liu, Haocheng Zhao, Xiangyu Zhu, Jianying Zheng,
+  Pengfei Huang, Xianyuan Zhan, Jianming Zhu, and Jun Hu.
+\newblock Beyond {OOD} state actions: Supported cross-domain offline
+  reinforcement learning.
+\newblock In {\em AAAI}, 2024.
+
+\bibitem{peng2018}
+Xue~Bin Peng et~al.
+\newblock Sim-to-real transfer of robotic control with dynamics randomization.
+\newblock In {\em ICRA}, 2018.
+
+\bibitem{ray2019bench}
+Alex Ray, Joshua Achiam, and Dario Amodei.
+\newblock Benchmarking safe exploration in deep reinforcement learning, 2019.
+
+\bibitem{ross-bagnell-2012}
+St{\'e}phane Ross and J.~Andrew Bagnell.
+\newblock Agnostic system identification for model-based reinforcement
+  learning.
+\newblock In {\em ICML}, 2012.
+
+\bibitem{drake-sim2real}
+Russ Tedrake and Scott Kuindersma.
+\newblock Bridging the sim-to-real gap with dynamic compliance control.
+\newblock In {\em ICRA Workshop on Robotic Manipulation}, 2023.
+
+\bibitem{tobin2017}
+Josh Tobin et~al.
+\newblock Domain randomization for transferring deep neural networks from
+  simulation to the real world.
+\newblock In {\em IROS}, 2017.
+
+\bibitem{nau}
+Andrew Trask, Felix Hill, Scott~E Reed, Jack Rae, Chris Dyer, and Phil Blunsom.
+\newblock Neural arithmetic logic units.
+\newblock In {\em NeurIPS}, 2018.
+
+\end{thebibliography}
