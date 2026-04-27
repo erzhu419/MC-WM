@@ -35,6 +35,20 @@ DEFAULT_TIMEOUT_S = 60
 DEFAULT_MAX_TOKENS = 2048  # Enriched prompts may generate ~1500-tok reasoning
                            # for Role #3; keep headroom to avoid truncation
 
+# DeepSeek defaults (OpenAI-compatible; free tier).  Selected when
+# DEEPSEEK_API_KEY is set and backend != "claude".
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+
+# GLM defaults (Zhipu AI; OpenAI-compatible).  Free models include
+# glm-4-flash; user may specify glm-5.1 or any other name.  API key
+# from GLM_API_KEY env var (falls back to DEEPSEEK_API_KEY when sharing
+# a unified gateway).
+DEFAULT_GLM_MODEL = "glm-5.1"
+# Default GLM endpoint: user's ruoli.dev gateway (OpenAI-compatible).
+# Override via GLM_BASE_URL env var or constructor arg if needed.
+DEFAULT_GLM_BASE_URL = "https://ruoli.dev/v1"
+
 
 def _load_api_key_from_config() -> Optional[str]:
     """Parse `export ANTHROPIC_API_KEY="..."` from ~/.config/mcwm/api_key.env."""
@@ -67,15 +81,23 @@ class ClaudeCLIOracle:
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
+        model: Optional[str] = None,
         cli: str = DEFAULT_CLI,
         timeout: int = DEFAULT_TIMEOUT_S,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         log_fn=None,
         cache_dir: Optional[str] = "/tmp/mcwm_claude_cache",
         force_cli: bool = False,
+        # ── Backend selection ────────────────────────────────────────
+        # "auto"     : pick glm > deepseek > claude based on env-var availability
+        # "claude"   : Anthropic SDK
+        # "deepseek" : DeepSeek (OpenAI-compatible)
+        # "glm"      : Zhipu GLM (OpenAI-compatible)
+        # "cli"      : Claude CLI subprocess
+        backend: str = "auto",
+        deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL,
+        glm_base_url: str = DEFAULT_GLM_BASE_URL,
     ) -> None:
-        self.model = model
         self.cli = cli
         self.timeout = timeout
         self.max_tokens = max_tokens
@@ -87,22 +109,88 @@ class ClaudeCLIOracle:
         self.n_cache_hits = 0
         self.n_errors = 0
         self.n_retries = 0
+        self._deepseek_base_url = deepseek_base_url
+        self._glm_base_url = glm_base_url
 
-        # Pick transport: SDK if possible, else CLI.
-        self._use_sdk = False
+        # Resolve backend → transport.
+        self._backend = "cli"   # default fallback; refined below
         self._sdk_client = None
-        if not force_cli:
+
+        if force_cli:
+            backend = "cli"
+
+        if backend == "auto":
+            if os.environ.get("GLM_API_KEY"):
+                backend = "glm"
+            elif os.environ.get("DEEPSEEK_API_KEY"):
+                backend = "deepseek"
+            elif os.environ.get("ANTHROPIC_API_KEY") or _load_api_key_from_config():
+                backend = "claude"
+            else:
+                backend = "cli"
+
+        # GLM (OpenAI-compatible) — via ruoli.dev gateway by default.
+        if backend == "glm":
+            api_key = os.environ.get("GLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+            # GLM_BASE_URL env var (or constructor arg) overrides the default.
+            base_url = os.environ.get("GLM_BASE_URL") or self._glm_base_url
+            if not api_key:
+                self._log("  [LLM Oracle] GLM_API_KEY missing; falling back to deepseek/claude/cli")
+                backend = "deepseek"  # try deepseek next
+            else:
+                try:
+                    import openai  # noqa: F401
+                    self._sdk_client = openai.OpenAI(
+                        api_key=api_key, base_url=base_url)
+                    self._backend = "glm"
+                    self.model = model or DEFAULT_GLM_MODEL
+                    self._log(f"  [LLM Oracle] GLM mode "
+                              f"(model={self.model}, base={base_url}, "
+                              f"key=...{api_key[-4:]})")
+                except ImportError:
+                    self._log("  [LLM Oracle] openai SDK missing; install openai>=1.0; "
+                              "falling back to deepseek/claude/cli")
+                    backend = "deepseek"
+
+        if backend == "deepseek":
+            api_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
+                self._log("  [LLM Oracle] DEEPSEEK_API_KEY missing; falling back to claude/cli")
+                backend = "auto-fallback-claude"  # try claude next
+            else:
+                try:
+                    import openai  # noqa: F401
+                    self._sdk_client = openai.OpenAI(
+                        api_key=api_key, base_url=self._deepseek_base_url)
+                    self._backend = "deepseek"
+                    self.model = model or DEFAULT_DEEPSEEK_MODEL
+                    self._log(f"  [LLM Oracle] DeepSeek mode "
+                              f"(model={self.model}, key=...{api_key[-4:]})")
+                except ImportError:
+                    self._log("  [LLM Oracle] openai SDK missing; "
+                              "install openai>=1.0 for DeepSeek backend; "
+                              "falling back to claude/cli")
+                    backend = "auto-fallback-claude"
+
+        if backend in ("claude", "auto-fallback-claude"):
             api_key = os.environ.get("ANTHROPIC_API_KEY") or _load_api_key_from_config()
             if api_key:
                 try:
                     import anthropic  # noqa: F401
                     self._sdk_client = anthropic.Anthropic(api_key=api_key)
-                    self._use_sdk = True
-                    self._log(f"  [Claude Oracle] SDK mode (key: ...{api_key[-4:]})")
+                    self._backend = "claude"
+                    self.model = model or DEFAULT_MODEL
+                    self._log(f"  [LLM Oracle] Claude SDK mode "
+                              f"(model={self.model}, key=...{api_key[-4:]})")
                 except ImportError:
-                    self._log("  [Claude Oracle] anthropic SDK missing; falling back to CLI")
-        if not self._use_sdk:
-            self._log("  [Claude Oracle] CLI subprocess mode")
+                    self._log("  [LLM Oracle] anthropic SDK missing; falling back to CLI")
+                    backend = "cli"
+            else:
+                backend = "cli"
+
+        if self._backend == "cli":
+            self.model = model or DEFAULT_MODEL
+            self._log("  [LLM Oracle] Claude CLI subprocess mode")
 
     # ──────────────────────────────────────────────────────────────────
     # Cache
@@ -231,6 +319,39 @@ class ClaudeCLIOracle:
         return ""
 
     # ──────────────────────────────────────────────────────────────────
+    # DeepSeek transport (OpenAI-compatible)
+    # ──────────────────────────────────────────────────────────────────
+
+    def _call_deepseek(self, prompt: str) -> str:
+        """Call DeepSeek's OpenAI-compatible chat.completions endpoint."""
+        backoffs = [0, 2, 5, 10]
+        last_err = ""
+        for attempt, wait_s in enumerate(backoffs):
+            if wait_s > 0:
+                self.n_retries += 1
+                self._log(f"  [DeepSeek] transient error, retry "
+                          f"{attempt}/{len(backoffs)-1} after {wait_s}s ...")
+                time.sleep(wait_s)
+            try:
+                resp = self._sdk_client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=self.max_tokens,
+                    timeout=self.timeout,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {str(e)[:200]}"
+                # Retry on rate limit / 5xx; openai-style errors mostly
+                # surface as APIError / RateLimitError / APIConnectionError.
+                cls_name = type(e).__name__.lower()
+                if "ratelimit" not in cls_name and "connection" not in cls_name \
+                        and "timeout" not in cls_name and "internalserver" not in cls_name:
+                    break
+        self._log(f"  [DeepSeek] giving up after retries: {last_err}")
+        return ""
+
+    # ──────────────────────────────────────────────────────────────────
     # Top-level transport dispatcher
     # ──────────────────────────────────────────────────────────────────
 
@@ -241,7 +362,14 @@ class ClaudeCLIOracle:
             self.n_cache_hits += 1
             return cached
         self.n_calls += 1
-        raw = self._call_sdk(prompt) if self._use_sdk else self._call_cli(prompt)
+        if self._backend in ("deepseek", "glm"):
+            # Both use the same OpenAI-compatible chat.completions interface;
+            # only base_url + key differ at construction time.
+            raw = self._call_deepseek(prompt)
+        elif self._backend == "claude":
+            raw = self._call_sdk(prompt)
+        else:
+            raw = self._call_cli(prompt)
         if raw:
             self._write_cache(cache_key, raw)
         else:
@@ -277,7 +405,8 @@ class ClaudeCLIOracle:
             "cache_hits": self.n_cache_hits,
             "errors": self.n_errors,
             "retries": self.n_retries,
-            "transport": "sdk" if self._use_sdk else "cli",
+            "transport": self._backend,
+            "model": self.model,
         }
 
     # ──────────────────────────────────────────────────────────────────

@@ -184,6 +184,21 @@ class RESACAgent:
         tau: float = 5e-3,
         alpha_init: float = 0.2,
         max_alpha: float = 0.6,
+        # ── BAPR v10 stability fix (mirrored from CS-BAPR P0+P1) ─────────
+        # First N updates run as pure RE-SAC (no gap/QΔ trust weighting).
+        # The QΔ critic and ensemble Q-std are unreliable until the critic has
+        # seen enough transitions to actually disagree. Forcing trust=1 during
+        # warmup avoids over-conservatism that locks bad early basins.
+        bapr_warmup_iters: int = 100,
+        # Alpha floor: prevent entropy collapse during early training.
+        # CS-BAPR uses 0.01; RESAC's auto-alpha can otherwise go to ~0.
+        min_alpha: float = 0.01,
+        # Reward EMA normalization: divide reward by running std (no mean
+        # shift — preserves sign). Stabilizes Q magnitudes when the env
+        # reward has variable scale across episodes.
+        use_reward_norm: bool = True,
+        reward_ema_alpha: float = 0.01,
+        # ─────────────────────────────────────────────────────────────────
         device: str = DEVICE,
         gap_fn=None,
         penalty_scale: float = 0.1,
@@ -195,6 +210,11 @@ class RESACAgent:
         self.beta_bc  = beta_bc
         self.critic_actor_ratio = critic_actor_ratio
         self.max_alpha = max_alpha
+        self.min_alpha = min_alpha
+        self.bapr_warmup_iters = bapr_warmup_iters
+        self.use_reward_norm = use_reward_norm
+        self.reward_ema_alpha = reward_ema_alpha
+        self._reward_ema_var = 1.0
         self.device = device
         self._update_count = 0
 
@@ -232,11 +252,25 @@ class RESACAgent:
 
     @property
     def alpha(self):
-        return min(self.max_alpha, self.log_alpha.exp().item())
+        # Both ceiling (max_alpha) and floor (min_alpha) — floor prevents
+        # entropy collapse during early training when log_prob is tiny.
+        return min(self.max_alpha, max(self.min_alpha, self.log_alpha.exp().item()))
 
     def update(self, buf):
         self._update_count += 1
         s, a, r, s2, d = buf.sample(256)
+
+        # ── Reward EMA normalization (BAPR v10 piece): scale-only, no shift.
+        # Divides reward by running std so Q magnitude stays well-behaved
+        # under variable per-episode reward scale. Skipped on first batch
+        # (var≈0) and gracefully bounded below by 1e-6.
+        if self.use_reward_norm:
+            batch_var = float(r.var().item())
+            self._reward_ema_var = (
+                (1.0 - self.reward_ema_alpha) * self._reward_ema_var
+                + self.reward_ema_alpha * batch_var
+            )
+            r = r / max(self._reward_ema_var ** 0.5, 1e-6)
 
         # ── Alpha update
         _, log_prob, _ = self.actor.evaluate(s)
@@ -251,10 +285,15 @@ class RESACAgent:
             q_tgt_raw = r.squeeze(-1) + self.gamma * (1 - d.squeeze(-1)) * (q_next_min - self.alpha * lp2)
             q_tgt = q_tgt_raw
 
-        # Compute per-transition importance weight from gap signal
+        # Compute per-transition importance weight from gap signal.
+        # Warmup gate (BAPR v10 P0): for the first bapr_warmup_iters updates,
+        # force iw_weights=None so the critic trains as pure RE-SAC.  This
+        # avoids early-training over-conservatism when gap/QΔ signals are
+        # still uncalibrated.
         gap_raw = None
         iw_weights = None  # importance weights (B,)
-        if self.use_direct_gap and self.gap_fn is not None:
+        warmup_done = self._update_count > self.bapr_warmup_iters
+        if warmup_done and self.use_direct_gap and self.gap_fn is not None:
             with torch.no_grad():
                 s_np = s.cpu().numpy(); a_np = a.cpu().numpy()
                 gap_np = self.gap_fn(s_np, a_np)  # (B,) — rank-preserving, [0,1] normalized
@@ -265,7 +304,7 @@ class RESACAgent:
                 # gap=1 (max gap) → w=w_min (reduced weight)
                 w_min = self.penalty_scale  # reuse penalty_scale as w_min
                 iw_weights = w_min + (1.0 - w_min) * (1.0 - gap_t)  # (B,) in [w_min, 1.0]
-        elif self.q_delta is not None:
+        elif warmup_done and self.q_delta is not None:
             with torch.no_grad():
                 qd_val = self.q_delta.q_delta(s, a).mean(0).squeeze(-1)  # (B,)
                 # Normalize QΔ to [0, 1] via sigmoid
@@ -301,8 +340,9 @@ class RESACAgent:
             actor_loss = policy_loss + self.beta_bc * bc_loss
 
             # Confidence constraint on actor: penalize exploring low-confidence regions
-            # gap_fn returns 1-confidence, so high gap = low confidence
-            if self.use_direct_gap and self.gap_fn is not None:
+            # gap_fn returns 1-confidence, so high gap = low confidence.
+            # Same warmup gate as critic: skip during the BAPR v10 warmup window.
+            if warmup_done and self.use_direct_gap and self.gap_fn is not None:
                 with torch.no_grad():
                     s_np_actor = s.cpu().numpy()
                     a_np_actor = a_new.detach().cpu().numpy()
@@ -330,6 +370,9 @@ class RESACAgent:
             "q_pred_std": float(q_pred.std(0).mean()),
             "q_tgt_mean": float(q_tgt.mean()),
             "q_tgt_raw_mean": float(q_tgt_raw.mean()),
+            # BAPR v10 diagnostics
+            "warmup_done": int(warmup_done),
+            "reward_ema_std": float(self._reward_ema_var ** 0.5),
         }
         if iw_weights is not None:
             diag["iw_mean"] = float(iw_weights.mean())

@@ -30,10 +30,26 @@ class OrthogonalExpander:
     that correlate with the residual.
     """
 
-    def __init__(self, obs_dim, act_dim, min_correlation=0.05):
+    def __init__(self, obs_dim, act_dim, min_correlation=0.05,
+                 max_delta_beta_inf: float | None = None,
+                 prev_basis_beta: "np.ndarray | None" = None):
+        """
+        Args:
+            obs_dim/act_dim: env shape
+            min_correlation: existing correlation gate.
+            max_delta_beta_inf: RAHD Stage B — if set, reject candidates
+                whose addition would push the L∞ change in fitted SINDy
+                coefficients (compared to the previous round) beyond this
+                threshold.  ``None`` disables the gate (legacy behavior).
+            prev_basis_beta: (F_prev, D) coefficients from the previous
+                fit, required only when ``max_delta_beta_inf`` is set so
+                this expander can estimate ΔL_eff.
+        """
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.min_correlation = min_correlation
+        self.max_delta_beta_inf = max_delta_beta_inf
+        self.prev_basis_beta = prev_basis_beta
 
     def expand(self, SA, Theta, remainder, feature_names=None, log_fn=None):
         """
@@ -89,6 +105,21 @@ class OrthogonalExpander:
             max_corr = float(corrs.max())
 
             if max_corr > self.min_correlation:
+                # RAHD Stage B (stability gate): estimate the magnitude of
+                # the new SINDy coefficient introduced by accepting this
+                # candidate.  Closed-form OLS for the orthogonal component:
+                #   β_c ≈ ⟨c_orth, r_d⟩ / ‖c_orth‖²    for each output dim d
+                # We use the L∞ over output dims as the ΔL_eff proxy.  A
+                # large β_c means the feature is poised to dominate, which
+                # historically destabilises NAU (commit 4f53dcd).
+                if self.max_delta_beta_inf is not None:
+                    norm_sq = float(np.dot(c_orth, c_orth))
+                    if norm_sq > 1e-12:
+                        beta_c = (c_orth @ remainder) / norm_sq  # (D,)
+                        delta_beta_inf = float(np.max(np.abs(beta_c)))
+                        if delta_beta_inf > self.max_delta_beta_inf:
+                            # Reject — too disruptive to coefficient layer.
+                            continue
                 # Store RAW candidate (not orthogonalized) for SINDy fitting
                 # Orthogonalization was only for selection, not for use
                 ortho_candidates.append(c)

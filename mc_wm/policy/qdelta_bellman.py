@@ -40,23 +40,41 @@ import torch.optim as optim
 
 class QDeltaNet(nn.Module):
     """
-    Log-confidence critic: (s, a) → QΔ(s, a) ≤ 0.
+    Log-confidence critic: (s, a [, sig]) → QΔ ≤ 0.
 
     Uses a soft-clamped output (−softplus) to guarantee QΔ ≤ 0 without
     hard truncation (which breaks gradients near the boundary).
+
+    Belief-conditioned variant (BAPR v15 analog): when ``sig_dim > 0``,
+    ``forward`` accepts a per-(s, a) ``sig`` tensor — typically a vector
+    residual signature (e.g. per-dim ensemble std). This avoids the
+    "scalar collapse" of mapping (multi-dim diagnostic) → scalar trust
+    weight before the critic ever sees the diagnostic.
     """
 
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128,
+                 sig_dim: int = 0):
         super().__init__()
+        self.sig_dim = sig_dim
+        in_dim = obs_dim + act_dim + sig_dim
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, hidden), nn.ReLU(),
+            nn.Linear(in_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, 1),
         )
 
-    def forward(self, obs: torch.Tensor, act: torch.Tensor) -> torch.Tensor:
-        """Returns QΔ(s, a) ≤ 0 with shape (B, 1)."""
-        x = torch.cat([obs, act], dim=-1)
+    def forward(self, obs: torch.Tensor, act: torch.Tensor,
+                sig: torch.Tensor | None = None) -> torch.Tensor:
+        """Returns QΔ ≤ 0 with shape (B, 1)."""
+        if self.sig_dim > 0:
+            if sig is None:
+                # Caller didn't supply signature — fill zeros so shape is valid.
+                # This makes the belief-conditioned net degrade gracefully to
+                # the scalar version when no signature is available.
+                sig = obs.new_zeros((obs.shape[0], self.sig_dim))
+            x = torch.cat([obs, act, sig], dim=-1)
+        else:
+            x = torch.cat([obs, act], dim=-1)
         raw = self.net(x)
         return -F.softplus(raw)  # ∈ (-∞, 0]
 
@@ -80,15 +98,25 @@ class QDeltaBellman:
     def __init__(self, obs_dim: int, act_dim: int,
                  hidden: int = 128, gamma: float = 0.9,
                  lr: float = 3e-4, tau_half_life: float = 0.0,
-                 device: str = "cpu"):
+                 device: str = "cpu",
+                 # ── Belief-conditioning (BAPR v15 analog) ──────────────
+                 # sig_fn: optional callable(s_tensor, a_tensor) → (B, sig_dim)
+                 # vector residual signature.  When set, QΔ network is
+                 # widened by sig_dim input units and the signature is
+                 # passed at every train/eval call.  This avoids the
+                 # "scalar collapse" of squashing a multi-dim diagnostic
+                 # to a scalar trust weight before the critic ever uses it.
+                 sig_fn=None, sig_dim: int = 0):
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.gamma = gamma
         self.device = device
+        self.sig_fn = sig_fn
+        self.sig_dim = sig_dim
 
-        self.net = QDeltaNet(obs_dim, act_dim, hidden).to(device)
+        self.net = QDeltaNet(obs_dim, act_dim, hidden, sig_dim=sig_dim).to(device)
         # Target network (Polyak-averaged) to stabilise TD bootstrap.
-        self.target = QDeltaNet(obs_dim, act_dim, hidden).to(device)
+        self.target = QDeltaNet(obs_dim, act_dim, hidden, sig_dim=sig_dim).to(device)
         self.target.load_state_dict(self.net.state_dict())
         for p in self.target.parameters():
             p.requires_grad = False
@@ -127,14 +155,17 @@ class QDeltaBellman:
         """
         self._update_tau(mse_per_sample)
         log_c_step = torch.log(self._c_step(mse_per_sample).clamp(min=1e-8)).unsqueeze(-1)
+        # Compute signatures once per batch — both forward and target.
+        sig_sa = self._eval_sig(s, a)
         # Stop grad on targets.
         with torch.no_grad():
             a2 = policy_get_next_action(s2)
-            qd_next = self.target(s2, a2)  # (B, 1) ≤ 0
+            sig_s2a2 = self._eval_sig(s2, a2)
+            qd_next = self.target(s2, a2, sig_s2a2)  # (B, 1) ≤ 0
             target = log_c_step + self.gamma * (1 - done).unsqueeze(-1) * qd_next
         last_loss = 0.0
         for _ in range(n_iters):
-            pred = self.net(s, a)
+            pred = self.net(s, a, sig_sa)
             loss = F.mse_loss(pred, target)
             self.optimizer.zero_grad()
             loss.backward()
@@ -145,12 +176,23 @@ class QDeltaBellman:
             for p, p_tgt in zip(self.net.parameters(), self.target.parameters()):
                 p_tgt.data.mul_(1 - self.tau_polyak).add_(p.data, alpha=self.tau_polyak)
         return {"td_loss": last_loss, "tau": self._tau,
-                "qd_mean": float(self.net(s, a).mean().detach().item())}
+                "qd_mean": float(self.net(s, a, sig_sa).mean().detach().item())}
+
+    @torch.no_grad()
+    def _eval_sig(self, s: torch.Tensor, a: torch.Tensor):
+        """Compute residual signature, or None if sig_fn is not configured."""
+        if self.sig_fn is None or self.sig_dim == 0:
+            return None
+        sig = self.sig_fn(s, a)
+        # Be defensive: clamp + finite-cast in case sig_fn produces NaN/Inf.
+        sig = torch.nan_to_num(sig, nan=0.0, posinf=1e3, neginf=-1e3)
+        return sig.detach()
 
     @torch.no_grad()
     def weight(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """Per-(s,a) MBPO rollout weight = exp(QΔ(s,a)) ∈ (0, 1]."""
-        return self.net(s, a).exp().squeeze(-1)
+        """Per-(s,a) MBPO rollout weight = exp(QΔ(s,a [, sig])) ∈ (0, 1]."""
+        sig = self._eval_sig(s, a)
+        return self.net(s, a, sig).exp().squeeze(-1)
 
     def weight_np(self, s_np, a_np):
         """Numpy interface."""

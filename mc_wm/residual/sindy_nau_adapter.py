@@ -51,9 +51,40 @@ class SINDyNAUAdapter:
                  nau_hidden=32, lr=1e-3, device="cpu",
                  max_rounds=3, eps_threshold=0.05, diagnosis_alpha=0.05,
                  log_fn=None, env_type=None, claude_oracle=None,
-                 env_description_for_llm: str | None = None):
+                 env_description_for_llm: str | None = None,
+                 # ── RAHD knobs (all default-off: legacy behavior preserved)
+                 # A. cross-env feature pool: when set, query/update this pool
+                 #    so candidates are seeded from prior runs and accepted
+                 #    features are written back.
+                 feature_pool=None,
+                 feature_pool_top_k: int = 10,
+                 # B. ΔL_eff stability gate on orthogonal expansion.
+                 max_delta_beta_inf: float | None = None,
+                 # C. policy-aware fit weights.  Pass a PolicyDensity instance
+                 #    or None.  When set, the SINDy fit becomes a weighted LS.
+                 policy_density=None,
+                 # D. reward-aware acceptance.  Pass a RewardValidator-like
+                 #    callable, or None.  When set, every accepted feature
+                 #    is run through ``reward_validator`` and rejected if
+                 #    its delta is below ``reward_validator_min_delta``.
+                 reward_validator=None,
+                 reward_validator_min_delta: float = 0.0):
         self._log = log_fn or (lambda msg: print(msg))
         self._env_type = env_type  # if set, use LLM oracle instead of auto-expand
+        # RAHD module hooks (any can be None → legacy behavior).
+        self._feature_pool = feature_pool
+        self._feature_pool_top_k = feature_pool_top_k
+        self._max_delta_beta_inf = max_delta_beta_inf
+        self._policy_density = policy_density
+        self._reward_validator = reward_validator
+        self._reward_validator_min_delta = reward_validator_min_delta
+        # Pool-side tag — independent from ``_env_type`` so we don't change
+        # the semantics of the legacy LLMOracle gating.  Defaults to a stable
+        # string; callers may override to a fine-grained env name.
+        self._pool_env_tag = env_type or "unknown_env"
+        # Track feature provenance so the pool can be updated correctly
+        # at end-of-fit: name → "pool" | "orth" | "llm".
+        self._feat_provenance: dict[str, str] = {}
         # Role #2: Claude oracle for feature hypotheses in the self-hypothesis loop.
         # When set, augments orthogonal expansion with LLM-suggested physics features.
         self._claude_oracle = claude_oracle
@@ -292,29 +323,133 @@ class SINDyNAUAdapter:
             self._log(f"│ acceptance rate     : {accept_rate:.1f}%")
         self._log("└──────────────────────────────────────────")
 
-    def _sindy_fit_one_round(self, Theta, targets):
-        """Fit SINDy coefficients (Ridge + STLSQ) on feature matrix Theta."""
+    def _update_feature_pool(self, Theta_full, targets, extra_names):
+        """RAHD-A write-back: log each non-poly2 feature's leave-one-out
+        validation-MSE drop into the cross-env feature pool.
+
+        Uses the last 10% of rows as the held-out validation set; for each
+        extra column ``j``, computes
+            mse_with    = mean((Theta_full @ β - targets) ** 2)
+            mse_without = mean((Theta_full[:, ¬j] @ β_without - targets) ** 2)
+        on the validation slice.  ``reward_gain`` proxy = (mse_without - mse_with) /
+        max(mse_with, 1e-6), clipped to [0, 1] for the pool's running mean.
+
+        The actual env-side mini-rollout (RAHD-D) is run separately by
+        step2_mbrl_residual.py and overrides this proxy via
+        ``record_feature_reward_gain``.
+        """
+        try:
+            import numpy as _np
+            n_extra = len(extra_names)
+            if n_extra == 0:
+                return
+            n_poly = Theta_full.shape[1] - n_extra
+            n_total = Theta_full.shape[0]
+            n_val = max(50, n_total // 10)
+            val_slice = slice(n_total - n_val, n_total)
+            theta_val = Theta_full[val_slice]
+            tgt_val = targets[val_slice]
+
+            # Use the SINDy coefficients we just fit (self._sindy_coefs is
+            # (n_outputs, n_features); rows = output dims).
+            beta = self._sindy_coefs  # (D, F)
+            pred_full = theta_val @ beta.T  # (n_val, D)
+            mse_with = float(_np.mean((pred_full - tgt_val) ** 2))
+
+            for j_idx, name in enumerate(extra_names):
+                col = n_poly + j_idx
+                # Mask: drop column ``col`` from Theta and zero its β rows.
+                mask = _np.ones(beta.shape[1], dtype=bool)
+                mask[col] = False
+                theta_drop = theta_val[:, mask]
+                beta_drop = beta[:, mask]
+                pred_drop = theta_drop @ beta_drop.T
+                mse_without = float(_np.mean((pred_drop - tgt_val) ** 2))
+                gain = max(0.0, min(1.0, (mse_without - mse_with) /
+                                          max(mse_with, 1e-6)))
+                env = self._pool_env_tag
+                expr_for_pool = self._llm_feat_exprs.get(name, {}).get("expr") \
+                                if name in self._llm_feat_exprs else f"<orth:{name}>"
+                self._feature_pool.record(
+                    name=name, expr=expr_for_pool, env=env,
+                    reward_gain=gain, was_accepted=True,
+                )
+            # Save once after the round to avoid IO churn.
+            self._feature_pool.save()
+            self._log(f"  RAHD-A: feature pool updated with {n_extra} entries")
+        except Exception as e:
+            self._log(f"  RAHD-A: pool update failed ({e}); ignoring")
+
+    def record_feature_reward_gain(self, name: str, env: str,
+                                   reward_gain: float) -> None:
+        """RAHD-D hook: external caller (e.g., step2 mini-rollout) can
+        override the validation-MSE proxy with a real reward delta."""
+        if self._feature_pool is None:
+            return
+        # Re-record with the same expr but the better gain estimate.  The
+        # pool's running-mean update will weight in proportion to call count.
+        expr = self._llm_feat_exprs.get(name, {}).get("expr", f"<orth:{name}>")
+        self._feature_pool.record(name=name, expr=expr, env=env,
+                                  reward_gain=reward_gain, was_accepted=True)
+
+    def _compute_policy_weights(self, SA):
+        """RAHD-C: per-sample weights for SINDy fit.
+
+        Returns None when no PolicyDensity was configured (legacy path).
+        Otherwise returns (N,) numpy array in [w_min, 1].
+        """
+        if self._policy_density is None:
+            return None
+        try:
+            return self._policy_density.weights(SA)
+        except Exception as e:
+            self._log(f"  RAHD-C: policy_density.weights failed ({e}); falling back to uniform")
+            return None
+
+    def _sindy_fit_one_round(self, Theta, targets, sample_weights=None):
+        """Fit SINDy coefficients (Ridge + STLSQ) on feature matrix Theta.
+
+        Args:
+            Theta: (N, F) feature matrix.
+            targets: (N, D) per-dim residual targets.
+            sample_weights: optional (N,) per-sample weights for RAHD-C.
+                Implemented via row-scaling of (Theta, y) so sklearn's
+                Ridge sees a weighted least-squares problem; this is
+                equivalent to passing ``sample_weight`` to Ridge.fit but
+                keeps the existing STLSQ-mask code path unchanged.
+        """
         n_outputs = targets.shape[1]
         coefs = np.zeros((n_outputs, Theta.shape[1]))
         active = []
         errors = np.zeros(n_outputs)
 
+        # Pre-scale rows by sqrt(w) — equivalent to weighted LS in Ridge.
+        if sample_weights is not None:
+            w = np.clip(np.asarray(sample_weights, dtype=np.float64), 1e-8, None)
+            sw = np.sqrt(w)
+            Theta_w = Theta * sw[:, None]
+        else:
+            Theta_w = Theta
+
         for dim in range(n_outputs):
             y = targets[:, dim]
+            y_w = y * sw if sample_weights is not None else y
             reg = Ridge(alpha=self.sindy_alpha, fit_intercept=False)
-            reg.fit(Theta, y)
+            reg.fit(Theta_w, y_w)
             coef = reg.coef_.copy()
             mask = np.abs(coef) > self.sindy_threshold
             for _ in range(10):
                 if not np.any(mask): break
                 reg2 = Ridge(alpha=self.sindy_alpha, fit_intercept=False)
-                reg2.fit(Theta[:, mask], y)
+                reg2.fit(Theta_w[:, mask], y_w)
                 coef_new = np.zeros_like(coef)
                 coef_new[mask] = reg2.coef_
                 coef = coef_new
                 mask = np.abs(coef) > self.sindy_threshold
             coefs[dim] = coef
             active.append(mask)
+            # Report the *unweighted* residual MSE for backward compatibility
+            # with downstream NAU OOD bound logging.
             y_pred = Theta @ coef
             errors[dim] = float(np.mean((y - y_pred) ** 2))
 
@@ -481,7 +616,10 @@ class SINDyNAUAdapter:
                 extra_cols = oracle_cols
                 extra_names = oracle_names
                 Theta_full = np.hstack([Theta, extra_cols])
-                coefs, active, errors = self._sindy_fit_one_round(Theta_full, targets)
+                # RAHD-C: policy-aware sample weights for the SINDy fit.
+                sw = self._compute_policy_weights(SA)
+                coefs, active, errors = self._sindy_fit_one_round(
+                    Theta_full, targets, sample_weights=sw)
                 self._log(f"  [LLM Oracle] {Theta_full.shape[1]} features "
                           f"({Theta.shape[1]} poly2 + {len(oracle_names)} physics), "
                           f"eps_max={errors.max():.5f}")
@@ -499,8 +637,10 @@ class SINDyNAUAdapter:
             else:
                 Theta_full = Theta
 
-            # Fit SINDy
-            coefs, active, errors = self._sindy_fit_one_round(Theta_full, targets)
+            # Fit SINDy (with optional RAHD-C policy-aware weighting)
+            sw = self._compute_policy_weights(SA)
+            coefs, active, errors = self._sindy_fit_one_round(
+                Theta_full, targets, sample_weights=sw)
             eps_max = float(errors.max())
 
             # Quality gate
@@ -551,9 +691,59 @@ class SINDyNAUAdapter:
             for ds in diag_summary[:3]:
                 self._log(f"      {ds}")
 
-            orth_expander = OrthogonalExpander(self.obs_dim, self.act_dim)
+            orth_expander = OrthogonalExpander(
+                self.obs_dim, self.act_dim,
+                max_delta_beta_inf=self._max_delta_beta_inf,
+            )
             new_extra, new_names, orth_diag = orth_expander.expand(
                 SA, Theta_full, remainder_s, log_fn=self._log)
+            # Track provenance for end-of-fit feature_pool update.
+            for n in new_names:
+                self._feat_provenance.setdefault(n, "orth")
+
+            # RAHD-A: seed candidates from cross-env feature pool.  These
+            # features were accepted in prior runs (any env) — re-evaluate
+            # them on the current SA and orthogonalise against Θ; if they
+            # still pass the same correlation gate they get added.
+            if self._feature_pool is not None:
+                from mc_wm.residual.feature_pool import evaluate_expression
+                pool_cands = self._feature_pool.query_candidates(
+                    env=self._pool_env_tag, top_k=self._feature_pool_top_k)
+                if pool_cands:
+                    self._log(f"    RAHD-A: trying {len(pool_cands)} pool candidates")
+                pool_added = 0
+                for pname, pexpr, _prio in pool_cands:
+                    if pname in extra_names or pname in new_names:
+                        continue  # already in basis
+                    col = evaluate_expression(pexpr, SA[:, :self.obs_dim],
+                                              SA[:, self.obs_dim:])
+                    if col is None:
+                        continue
+                    # Quick orthogonality + correlation check (mirrors
+                    # OrthogonalExpander internals).
+                    Q, _ = np.linalg.qr(Theta_full, mode="reduced")
+                    proj = Q @ (Q.T @ col)
+                    c_orth = col - proj
+                    if np.linalg.norm(c_orth) / (np.linalg.norm(col) + 1e-12) < 0.1:
+                        continue  # mostly redundant
+                    corrs = []
+                    for d in range(remainder_s.shape[1]):
+                        cc = np.corrcoef(c_orth, remainder_s[:, d])[0, 1]
+                        if not np.isnan(cc):
+                            corrs.append(abs(float(cc)))
+                    if not corrs or max(corrs) <= 0.05:
+                        continue
+                    # Pool features bypass auto-name conflict by prefixing.
+                    pname2 = f"pool_{pname}"
+                    if new_extra.shape[1] > 0:
+                        new_extra = np.hstack([new_extra, col[:, None]])
+                    else:
+                        new_extra = col[:, None]
+                    new_names.append(pname2)
+                    self._feat_provenance[pname2] = "pool"
+                    pool_added += 1
+                if pool_added > 0:
+                    self._log(f"    RAHD-A: {pool_added} pool features added")
 
             # Role #2: ask Claude for physics-informed features (optional).
             # Augments orthogonal expansion; LLM's suggestions are evaluated
@@ -620,33 +810,76 @@ class SINDyNAUAdapter:
         all_names = list(self._feature_names) + extra_names
         self._feature_names = all_names
         # Save expand specs for predict-time reconstruction.
-        # CRITICAL: LLM features must be stored SEPARATELY from orthogonal
-        # features — OrthogonalExpander cannot regenerate LLM names.
+        # CRITICAL: must preserve fit-time ORDER across orthogonal / pool /
+        # LLM features so the column count at predict time matches the NAU
+        # head's expected input.  Pool features (RAHD-A) carry their expr
+        # in feature_pool, so we look it up by name when stashing.
         self._expand_specs = []
         if self._env_type is not None:
             self._expand_specs.append(
                 {"type": "llm_oracle", "env_type": self._env_type})
         else:
-            orth_names = [n for n in extra_names
-                          if not (isinstance(n, str) and n.startswith("llm_"))]
-            llm_names = [n for n in extra_names
-                         if isinstance(n, str) and n.startswith("llm_")]
-            if orth_names:
-                self._expand_specs.append({"type": "orthogonal", "names": orth_names})
-            if llm_names:
-                # Preserve ORDER of llm_names so predict-time concat matches fit-time.
-                self._expand_specs.append({
-                    "type": "llm_features",
-                    "items": [(n, self._llm_feat_exprs.get(n, {}).get("expr", ""),
-                               self._llm_feat_exprs.get(n, {}).get("std", 1.0))
-                              for n in llm_names],
-                })
+            # Walk extra_names IN ORDER and assign each to one of the three
+            # reconstruction modes.  When two consecutive features share a
+            # mode they are batched into the same spec to minimise spec
+            # count; otherwise each switch creates a new spec entry.  This
+            # keeps the column order at predict time identical to fit time.
+            current_mode = None
+            current_items: list = []
+            def _flush():
+                nonlocal current_mode, current_items
+                if current_mode is None or not current_items:
+                    current_items = []; current_mode = None; return
+                if current_mode == "orthogonal":
+                    self._expand_specs.append(
+                        {"type": "orthogonal", "names": list(current_items)})
+                elif current_mode == "pool":
+                    self._expand_specs.append({
+                        "type": "pool_features",
+                        "items": list(current_items),
+                    })
+                elif current_mode == "llm_features":
+                    self._expand_specs.append({
+                        "type": "llm_features",
+                        "items": list(current_items),
+                    })
+                current_items = []; current_mode = None
+
+            for n in extra_names:
+                if isinstance(n, str) and n.startswith("llm_"):
+                    mode = "llm_features"
+                    item = (n, self._llm_feat_exprs.get(n, {}).get("expr", ""),
+                            self._llm_feat_exprs.get(n, {}).get("std", 1.0))
+                elif isinstance(n, str) and n.startswith("pool_"):
+                    mode = "pool_features"
+                    # Look up expr from the pool by stripping the prefix.
+                    pool_name = n[len("pool_"):]
+                    pool_meta = self._feature_pool.all_features().get(pool_name, {}) \
+                                if self._feature_pool is not None else {}
+                    item = (n, pool_meta.get("expr", ""))
+                else:
+                    mode = "orthogonal"
+                    item = n
+                if mode != current_mode:
+                    _flush()
+                    current_mode = mode
+                current_items.append(item)
+            _flush()
             self._expand_obs_dim = self.obs_dim
             self._expand_act_dim = self.act_dim
 
         n_active_total = sum(m.sum() for m in active)
         self._log(f"  SINDy final: {self._n_features} features, {n_active_total} active, "
               f"avg MSE={errors.mean():.5f}, rounds={len(self._hypothesis_logs)}")
+
+        # RAHD-A write-back: record each non-poly2 feature's outcome to the
+        # cross-env pool.  For each accepted feature we estimate a per-feature
+        # validation-MSE drop via leave-one-out on the held-out tail.  This
+        # is a cheap proxy for the full mini-rollout reward gain handled by
+        # RAHD-D in step2_mbrl_residual.py; both are useful — the pool prefers
+        # whichever is supplied last.
+        if self._feature_pool is not None and len(extra_names) > 0:
+            self._update_feature_pool(Theta_full, targets, extra_names)
 
         # ── Phase 2: NAU/NMU fine-tuning on final feature set
         if self._nau_head is None or self._nau_head.feature_net[0].in_features != self._n_features:
@@ -748,6 +981,23 @@ class SINDyNAUAdapter:
                     for n in spec['names']:  # preserve original order
                         if n in name_to_col:
                             extra.append(name_to_col[n])
+                    if extra:
+                        Theta = np.hstack([Theta, np.column_stack(extra)])
+                elif spec['type'] == 'pool_features':
+                    # Re-evaluate pool-feature expressions on new SA.  Pool
+                    # exprs use the same sandboxed namespace as LLM, with
+                    # ``s`` and ``a`` referring to (N, dim) arrays (NOT the
+                    # transposed convention that LLM features use).
+                    from mc_wm.residual.feature_pool import evaluate_expression
+                    s_arr = SA[:, :self.obs_dim]
+                    a_arr = SA[:, self.obs_dim:]
+                    extra = []
+                    for _name, expr in spec['items']:
+                        col = evaluate_expression(expr, s_arr, a_arr)
+                        if col is None:
+                            extra.append(np.zeros(len(SA)))
+                        else:
+                            extra.append(col)
                     if extra:
                         Theta = np.hstack([Theta, np.column_stack(extra)])
                 elif spec['type'] == 'llm_features':

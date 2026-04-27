@@ -196,6 +196,21 @@ class WorldModelEnsemble:
             means = torch.stack([m(s_t, a_t)[0] for m in self.models])
             return means.std(0).mean(dim=-1).cpu().numpy()
 
+    def per_dim_std(self, s_t, a_t):
+        """Ensemble-disagreement signature for QΔ belief-conditioning (P1).
+
+        Args:
+            s_t: (B, obs_dim) torch tensor on this ensemble's device.
+            a_t: (B, act_dim) torch tensor on this ensemble's device.
+        Returns:
+            (B, obs_dim + 1) tensor of per-dim ensemble std (state dims +
+            reward dim).  No normalization — the QΔ critic learns its own
+            scaling.  Detached, no_grad.
+        """
+        with torch.no_grad():
+            means = torch.stack([m(s_t, a_t)[0] for m in self.models])  # (K, B, D+1)
+            return means.std(dim=0).detach()
+
     def freeze(self):
         """Freeze all parameters (for residual adaptation phase)."""
         for m in self.models:

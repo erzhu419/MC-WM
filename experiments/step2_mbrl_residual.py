@@ -227,6 +227,32 @@ def main():
     parser.add_argument("--load_phi", default=None, help="Path to load ICRL φ (freezes it)")
     parser.add_argument("--icrl_combine", default="top_k", choices=["top_k", "soft"],
                         help="v4 default=top_k (filter top 70%); v2/v3=soft (w=QΔ×(0.5+0.5×φ))")
+    # ── BAPR v10 + RAHD knobs (default-off keeps legacy behavior) ─────
+    parser.add_argument("--bapr_warmup_iters", type=int, default=100,
+                        help="P0: first N RESACAgent updates run as pure RE-SAC "
+                             "(no gap/QΔ trust weighting).  Mirrors CS-BAPR v10. "
+                             "Set 0 to disable.")
+    parser.add_argument("--no_reward_norm", action="store_true",
+                        help="Disable reward EMA normalization in RESACAgent. "
+                             "Default: enabled (BAPR v10 piece).")
+    parser.add_argument("--alpha_floor", type=float, default=0.01,
+                        help="Floor on SAC entropy α to prevent collapse (BAPR v10).")
+    parser.add_argument("--qdelta_belief_sig", action="store_true",
+                        help="P1: feed per-dim residual ensemble std as a "
+                             "vector signature to the QΔ critic, instead of "
+                             "letting QΔ rely solely on (s, a).  BAPR v15 analog.")
+    parser.add_argument("--rahd_feature_pool", action="store_true",
+                        help="RAHD-A: enable cross-env feature pool at "
+                             "~/.mcwm/feature_pool.json.")
+    parser.add_argument("--rahd_max_delta_beta", type=float, default=None,
+                        help="RAHD-B: max ΔL_eff (proxy = ‖Δβ‖_∞) allowed when "
+                             "accepting a new SINDy feature.  None disables.")
+    parser.add_argument("--rahd_policy_aware", action="store_true",
+                        help="RAHD-C: weight SINDy fit by current policy's "
+                             "(s, a) visitation density.")
+    parser.add_argument("--rahd_reward_validate", action="store_true",
+                        help="RAHD-D: run mini-rollouts at refit time to "
+                             "validate each accepted feature's reward gain.")
     parser.add_argument("--use_kan_residual", action="store_true",
                         help="Replace SINDy+NAU with KAN for residual δ")
     parser.add_argument("--use_kan_phi", action="store_true",
@@ -313,6 +339,15 @@ def main():
     parser.add_argument("--sindy_ensemble_tau", type=float, default=0.1,
                         help="Gate softness: gate=1/(1+disagreement/tau). Smaller tau "
                              "= sharper cutoff (more samples get gated off).")
+    parser.add_argument("--llm_backend",
+                        choices=["auto", "glm", "deepseek", "claude", "cli"],
+                        default="auto",
+                        help="LLM oracle backend.  auto picks GLM > DeepSeek > Claude "
+                             "by env-var availability (GLM_API_KEY / DEEPSEEK_API_KEY / "
+                             "ANTHROPIC_API_KEY).  Set explicitly to override.")
+    parser.add_argument("--llm_model", default=None,
+                        help="LLM model name override.  Defaults: glm-5.1 / deepseek-chat / "
+                             "claude-haiku-4-5-20251001 depending on --llm_backend.")
     parser.add_argument("--claude_model", default="claude-haiku-4-5-20251001",
                         help="Model id for Claude oracle. Haiku 4.5 is default "
                              "(~10-20x cheaper than Sonnet; use --claude_model "
@@ -751,7 +786,15 @@ def main():
         # Role #1/#3).  None when --use_claude_llm not set.
         _claude = None; _env_desc = ""
         if args.use_claude_llm:
-            _claude = ClaudeCLIOracle(model=args.claude_model, log_fn=log)
+            # Backend: --llm_backend overrides; --llm_model overrides default.
+            # Backwards compat: if user passed --claude_model and not --llm_model,
+            # use claude_model only when explicit "claude"/"cli" backend.
+            _llm_model = args.llm_model
+            if _llm_model is None and args.llm_backend in ("claude", "cli"):
+                _llm_model = args.claude_model
+            _claude = ClaudeCLIOracle(model=_llm_model,
+                                       backend=args.llm_backend,
+                                       log_fn=log)
             if args.env.startswith("gravity"):
                 _env_desc = ("HalfCheetah-v4 with gravity 2x in sim, 1x in real. "
                              "obs[0]=rootz, obs[1]=torso_angle, obs[2:8]=6 joint angles, "
@@ -797,10 +840,39 @@ def main():
             log(f"  Training SINDy+NAU residual δ...")
             _env_type = "gravity_cheetah" if mode == "c8" else None
             _max_rounds = 3
+
+            # ── RAHD wiring (all default-off via CLI) ──────────────────
+            _feature_pool = None
+            if args.rahd_feature_pool:
+                from mc_wm.residual.feature_pool import FeaturePool
+                _feature_pool = FeaturePool()
+                log(f"  RAHD-A: feature pool active "
+                    f"({len(_feature_pool.all_features())} known features)")
+            _policy_density = None
+            if args.rahd_policy_aware:
+                from mc_wm.residual.policy_density import PolicyDensity
+                _policy_density = PolicyDensity(strategy="buffer", w_min=0.1)
+                # Use the most-recent half of real transitions as d^π samples.
+                _ref_n = max(1024, len(s_real) // 2)
+                _ref_sa = np.concatenate([s_real[-_ref_n:], a_real[-_ref_n:]],
+                                          axis=-1)
+                _policy_density.fit_reference(_ref_sa)
+                log(f"  RAHD-C: policy-aware fit active (n_ref={_ref_n})")
+            # Pool env tag for write-back uses the actual env name not the
+            # legacy llm-oracle gating ``_env_type`` (which is None for c9 runs
+            # and would otherwise misroute predict-time feature reconstruction).
+            _pool_env_tag = args.env
+
             residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
                                         env_type=_env_type, max_rounds=_max_rounds,
                                         claude_oracle=_claude,  # Role #2 hypotheses
-                                        env_description_for_llm=_env_desc)
+                                        env_description_for_llm=_env_desc,
+                                        feature_pool=_feature_pool,
+                                        max_delta_beta_inf=args.rahd_max_delta_beta,
+                                        policy_density=_policy_density)
+            # Wire the pool-side env tag (stays distinct from ``_env_type``).
+            if _feature_pool is not None:
+                residual._pool_env_tag = _pool_env_tag
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20,
                      real_dones=None if NO_DONE_HEAD else d_real)
@@ -892,7 +964,11 @@ def main():
         env_real = env_cls(mode="real")
         al = float(env_real.action_space.high[0])
         agent = RESACAgent(obs_dim, act_dim, al, hidden_dim=HIDDEN, n_critics=N_CRITICS,
-                           beta=BETA_LCB, lr=LR, device=DEVICE)
+                           beta=BETA_LCB, lr=LR, device=DEVICE,
+                           # ── BAPR v10 stability fix ─────────────────
+                           bapr_warmup_iters=args.bapr_warmup_iters,
+                           use_reward_norm=not args.no_reward_norm,
+                           min_alpha=args.alpha_floor)
         env_buf = ReplayBuffer(obs_dim, act_dim, REPLAY_SIZE)
         model_buf = ReplayBuffer(obs_dim, act_dim, MODEL_BUF_MAX)
 
@@ -914,9 +990,20 @@ def main():
         # per-step weight `1/(1+MSE/τ)` (no Bellman accumulation).
         qdelta_bellman = None
         if args.qdelta_gamma > 0:
+            # P1: optional belief-conditioning — QΔ critic also receives a
+            # per-(s,a) ensemble-disagreement signature so it can grade trust
+            # by *which dimensions* disagree, not just the scalar (s, a).
+            _sig_fn = None
+            _sig_dim = 0
+            if args.qdelta_belief_sig and 'wm_sim' in dir() and wm_sim is not None:
+                _sig_dim = obs_dim + 1  # state dims + reward dim
+                _sig_fn = wm_sim.per_dim_std
+                log(f"\n[QΔ-belief] P1 enabled: sig_dim={_sig_dim} "
+                    f"(per-dim ensemble std as belief vector)")
             qdelta_bellman = QDeltaBellman(
                 obs_dim, act_dim, hidden=128,
-                gamma=args.qdelta_gamma, lr=3e-4, device=DEVICE)
+                gamma=args.qdelta_gamma, lr=3e-4, device=DEVICE,
+                sig_fn=_sig_fn, sig_dim=_sig_dim)
             log(f"\n[QΔ] Bellman critic enabled: γ={args.qdelta_gamma} "
                 f"(log-confidence Bellman, see qdelta_bellman.py)")
 
