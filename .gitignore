@@ -33,3 +33,4 @@ experiments/diag_data/
 Constraint-Inference-in-Safe-IRL/
 icrl/
 simple-icrl/
+runs/
