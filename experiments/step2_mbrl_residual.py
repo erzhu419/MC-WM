@@ -253,6 +253,16 @@ def main():
     parser.add_argument("--rahd_reward_validate", action="store_true",
                         help="RAHD-D: run mini-rollouts at refit time to "
                              "validate each accepted feature's reward gain.")
+    parser.add_argument("--feature_library", default="poly2",
+                        choices=["poly2", "poly2_only", "poly3_only",
+                                 "trig_only", "random"],
+                        help="E3 baseline selector.  'poly2' (default) keeps "
+                             "the legacy poly2 + orth + LLM pipeline.  The "
+                             "'_only' variants disable orthogonal expansion "
+                             "and (when paired with no --use_claude_llm) make "
+                             "the SINDy library the only nonlinearity.")
+    parser.add_argument("--random_feature_count", type=int, default=100,
+                        help="K for --feature_library=random (RFF count).")
     parser.add_argument("--use_kan_residual", action="store_true",
                         help="Replace SINDy+NAU with KAN for residual δ")
     parser.add_argument("--use_kan_phi", action="store_true",
@@ -863,13 +873,19 @@ def main():
             # and would otherwise misroute predict-time feature reconstruction).
             _pool_env_tag = args.env
 
+            # Map CLI 'random' alias to internal 'random_K' tag.
+            _flib = args.feature_library
+            if _flib == "random":
+                _flib = f"random_{args.random_feature_count}"
             residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
                                         env_type=_env_type, max_rounds=_max_rounds,
                                         claude_oracle=_claude,  # Role #2 hypotheses
                                         env_description_for_llm=_env_desc,
                                         feature_pool=_feature_pool,
                                         max_delta_beta_inf=args.rahd_max_delta_beta,
-                                        policy_density=_policy_density)
+                                        policy_density=_policy_density,
+                                        feature_library=_flib,
+                                        random_feature_count=args.random_feature_count)
             # Wire the pool-side env tag (stays distinct from ``_env_type``).
             if _feature_pool is not None:
                 residual._pool_env_tag = _pool_env_tag

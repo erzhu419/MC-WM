@@ -68,7 +68,16 @@ class SINDyNAUAdapter:
                  #    is run through ``reward_validator`` and rejected if
                  #    its delta is below ``reward_validator_min_delta``.
                  reward_validator=None,
-                 reward_validator_min_delta: float = 0.0):
+                 reward_validator_min_delta: float = 0.0,
+                 # ── E3: feature-library baseline selector ─────────────
+                 # "poly2"        — default, current behavior (poly2 + orth + LLM)
+                 # "poly2_only"   — poly2, no orthogonal expansion, no LLM
+                 # "poly3_only"   — poly3, no orthogonal expansion, no LLM
+                 # "trig_only"    — sin/cos library, no orth, no LLM
+                 # "random_K"     — random Fourier features, count=K
+                 feature_library: str = "poly2",
+                 random_feature_count: int = 100,
+                 disable_orthogonal_expansion: bool = False):
         self._log = log_fn or (lambda msg: print(msg))
         self._env_type = env_type  # if set, use LLM oracle instead of auto-expand
         # RAHD module hooks (any can be None → legacy behavior).
@@ -100,8 +109,11 @@ class SINDyNAUAdapter:
         self.max_rounds = max_rounds
         self.eps_threshold = eps_threshold
 
-        # SINDy components (initialized on first fit)
-        self._library = ps.PolynomialLibrary(degree=2, include_bias=True)
+        # SINDy components (initialized on first fit).  E3-style baselines:
+        self._feature_library_kind = feature_library
+        self._random_feature_count = random_feature_count
+        self._disable_orthogonal_expansion = disable_orthogonal_expansion
+        self._library = self._build_library(feature_library, random_feature_count)
         self._sindy_coefs = None
         self._n_features = None
         self._feature_names = None
@@ -322,6 +334,53 @@ class SINDyNAUAdapter:
             accept_rate = 100.0 * s['accepted'] / s['proposed']
             self._log(f"│ acceptance rate     : {accept_rate:.1f}%")
         self._log("└──────────────────────────────────────────")
+
+    def _build_library(self, kind, K):
+        """E3 baseline feature libraries.
+
+        ``kind``:
+          * "poly2"          : poly2 (legacy default, with bias)
+          * "poly2_only"     : poly2 with bias; orthogonal expansion is
+                               disabled at fit-time, LLM is silenced
+                               separately by ``claude_oracle=None``.
+          * "poly3_only"     : poly3 with bias; same fit-time rules.
+          * "trig_only"      : pysindy FourierLibrary (sin/cos basis).
+          * "random_K"       : random-Fourier features fixed at construction.
+
+        Setting any of the ``_only`` kinds also forces
+        ``disable_orthogonal_expansion=True`` so the library is the only
+        source of nonlinearity; this is the matched-parameter baseline
+        the reviewer asked for in (E3).
+        """
+        kind = kind.lower()
+        if kind == "poly2":
+            return ps.PolynomialLibrary(degree=2, include_bias=True)
+        if kind == "poly2_only":
+            self._disable_orthogonal_expansion = True
+            return ps.PolynomialLibrary(degree=2, include_bias=True)
+        if kind == "poly3_only":
+            self._disable_orthogonal_expansion = True
+            return ps.PolynomialLibrary(degree=3, include_bias=True)
+        if kind == "trig_only":
+            self._disable_orthogonal_expansion = True
+            return ps.FourierLibrary(n_frequencies=3, include_sin=True, include_cos=True)
+        if kind.startswith("random"):
+            self._disable_orthogonal_expansion = True
+            # Random Fourier features approximating an RBF kernel.
+            class _RandomFourierLib:
+                def __init__(self, K, dim):
+                    rng = np.random.default_rng(42)
+                    self._K = K
+                    self._W = rng.standard_normal((dim, K))
+                    self._b = rng.uniform(0, 2*np.pi, size=K)
+                def fit(self, X): return self
+                def transform(self, X):
+                    proj = X @ self._W + self._b
+                    return np.sqrt(2.0 / self._K) * np.cos(proj)
+                def get_feature_names_out(self, input_features=None):
+                    return [f"rff_{i}" for i in range(self._K)]
+            return _RandomFourierLib(K=K, dim=self.input_dim)
+        raise ValueError(f"unknown feature_library '{kind}'")
 
     def _update_feature_pool(self, Theta_full, targets, extra_names):
         """RAHD-A write-back: log each non-poly2 feature's leave-one-out
@@ -686,17 +745,23 @@ class SINDyNAUAdapter:
                 self._log(f"    ⊘ Max rounds reached")
                 break
 
-            # Orthogonal expansion: find features in orthogonal complement of Θ
-            self._log(f"    → Orthogonal feature discovery ({n_fired} dims with structure)...")
-            for ds in diag_summary[:3]:
-                self._log(f"      {ds}")
-
-            orth_expander = OrthogonalExpander(
-                self.obs_dim, self.act_dim,
-                max_delta_beta_inf=self._max_delta_beta_inf,
-            )
-            new_extra, new_names, orth_diag = orth_expander.expand(
-                SA, Theta_full, remainder_s, log_fn=self._log)
+            # Orthogonal expansion: find features in orthogonal complement of Θ.
+            # Skipped when the user requested a fixed-library baseline (E3).
+            if self._disable_orthogonal_expansion:
+                self._log(f"    → Orthogonal expansion DISABLED (feature_library={self._feature_library_kind})")
+                new_extra = np.zeros((SA.shape[0], 0))
+                new_names = []
+                orth_diag = {"n_candidates": 0, "n_accepted": 0}
+            else:
+                self._log(f"    → Orthogonal feature discovery ({n_fired} dims with structure)...")
+                for ds in diag_summary[:3]:
+                    self._log(f"      {ds}")
+                orth_expander = OrthogonalExpander(
+                    self.obs_dim, self.act_dim,
+                    max_delta_beta_inf=self._max_delta_beta_inf,
+                )
+                new_extra, new_names, orth_diag = orth_expander.expand(
+                    SA, Theta_full, remainder_s, log_fn=self._log)
             # Track provenance for end-of-fit feature_pool update.
             for n in new_names:
                 self._feat_provenance.setdefault(n, "orth")
