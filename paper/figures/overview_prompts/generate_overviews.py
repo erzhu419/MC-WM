@@ -44,6 +44,36 @@ FIGURES = [
         "size": "1024x1024",
         "prompt": (HERE / "residual_bellman_gpt55_prompt.txt").read_text(),
     },
+    {
+        "name": "architecture_v2_claude",
+        "size": "1024x1024",
+        "prompt": (HERE / "architecture_v2_claude_prompt.txt").read_text(),
+    },
+    {
+        "name": "rahd_overview_claude",
+        "size": "1024x1024",
+        "prompt": (HERE / "rahd_overview_claude_prompt.txt").read_text(),
+    },
+    {
+        "name": "gap_taxonomy_v2_claude",
+        "size": "1024x1024",
+        "prompt": (HERE / "gap_taxonomy_v2_claude_prompt.txt").read_text(),
+    },
+    {
+        "name": "architecture_v2_gpt55",
+        "size": "1024x1024",
+        "prompt": (HERE / "architecture_v2_gpt55_prompt.txt").read_text(),
+    },
+    {
+        "name": "rahd_overview_gpt55",
+        "size": "1024x1024",
+        "prompt": (HERE / "rahd_overview_gpt55_prompt.txt").read_text(),
+    },
+    {
+        "name": "gap_taxonomy_v2_gpt55",
+        "size": "1024x1024",
+        "prompt": (HERE / "gap_taxonomy_v2_gpt55_prompt.txt").read_text(),
+    },
 ]
 
 

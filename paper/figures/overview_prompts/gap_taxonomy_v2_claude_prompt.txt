@@ -1,0 +1,22 @@
+Create a single 1024x1024 figure for a NeurIPS/ICLR paper, pure vector-flat scientific style, white background, thin 0.6pt black outlines, sans-serif labels (Helvetica-like), charcoal #2b2b2b body text, palette strictly limited to deep teal #264653, muted orange #E76F51, sand #F4A261, olive #8DB580, pale gray #E9ECEF — no gradients, no 3D, no shadows, no photorealism, no cartoons, no logos. Title at top center in small caps: "WHEN RESIDUAL CORRECTION HELPS: GAP TAXONOMY".
+
+Layout: divide the figure into two large side-by-side columns separated by a thin vertical divider, with a small "fail boundary" notation in the gutter.
+
+LEFT COLUMN (titled "physics-dynamics gap, MC-WM works"): pale teal banner header, then four small environment cards stacked vertically. Each card is a horizontal strip with three elements: (i) a small line-art robot silhouette at the left, (ii) a one-line env label centered, (iii) a small return-bar at the right showing MC-WM vs raw-sim height. Labels exactly:
+  Card 1: HalfCheetah silhouette, "gravity 2× → 1×", bar "5196 vs 543, 9.6×".
+  Card 2: HalfCheetah silhouette, "gravity 2× → 1× soft ceiling", bar "6288 vs 494, 12.7×".
+  Card 3: Walker2d silhouette, "friction 0.3× → 1× soft ceiling", bar "357 vs 262, 1.4×".
+  Card 4: Ant silhouette (8 legs), "carpet (high contact damping)", bar "MC-WM works".
+Underneath the four cards, a small green check mark and a one-line caption: "residual is policy-conditioned but in-support; SINDy poly2 + LLM features capture the additive correction".
+
+RIGHT COLUMN (titled "observation / actuator gap, MC-WM hurts"): pale orange banner header, then three smaller cards.
+  Card 1: HalfCheetah silhouette, "obs noise 5× sim only", bar "MC-WM 1180 < raw 1310".
+  Card 2: Ant silhouette with one broken-line leg, "actuator broken (one joint dead)", bar "MC-WM 280 < raw 410".
+  Card 3: HalfCheetah silhouette, "scale shift in obs[8:17]", bar "MC-WM 850 < raw 1050".
+Underneath, a small red cross and a one-line caption: "residual is extrapolated to OOD states; Theorem 2 says ‖V_real − V_resid‖ unbounded".
+
+Across the bottom of both columns, a horizontal pale-gray summary band reads: "Method works iff residual support intersects deployment policy support: Theorem 1 (residual simulation lemma) sets the bound, Theorem 2 (universal-false) sets the obstacle".
+
+In the gutter between columns, a thin vertical dashed line labeled (rotated 90°): "fail boundary: deployment π drifts off supp(d^π_data)".
+
+Whitespace between cards; consistent left-aligned text in cards; bars are simple two-color horizontal stacks (teal = MC-WM, orange = raw sim) with numeric labels printed at the bar end; 6pt minimum label readability; only the labels specified above — no hallucinated text, no extra envs, no extra captions.

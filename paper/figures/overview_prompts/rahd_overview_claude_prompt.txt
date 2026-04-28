@@ -1,0 +1,26 @@
+Create a single 1024x1024 figure for a NeurIPS/ICLR paper, pure vector-flat scientific style, white background, thin 0.6pt black outlines, sans-serif labels (Helvetica-like), charcoal #2b2b2b body text, palette strictly limited to deep teal #264653, muted orange #E76F51, sand #F4A261, olive #8DB580, pale gray #E9ECEF — no gradients, no 3D, no shadows, no photorealism, no cartoons, no logos. Title at top center in small caps: "RAHD: REWARD-ALIGNED HYPOTHESIS DISCOVERY". One-line subtitle: "stabilization (P0, P1) + acceptance and transfer (A, B, C)".
+
+Layout: a vertical "stack" composition. The figure shows the residual-fit pipeline as a vertical pipeline in the center column, with five external modules attached on the left and right sides via short horizontal arrows. The central pipeline runs top-to-bottom in five stages drawn as connected rounded rectangles:
+
+Stage 1 (deep teal): "Residual fit input: real-env transitions (s, a, s')".
+Stage 2 (sand): "Build feature matrix Φ(s, a)".
+Stage 3 (olive): "Weighted least-squares fit, sparsified via STLSQ".
+Stage 4 (sand): "NAU/NMU head trains on residuals; L_eff measured".
+Stage 5 (deep teal): "Locked sparsity → SGD warm-start refit during MBPO".
+Connect them with thin vertical arrows.
+
+Side modules (small rounded boxes, attached by horizontal arrows pointing INTO the central pipeline at the relevant stage):
+
+LEFT SIDE (acceptance and discovery):
+  - Box "P0 warmup gate" (muted orange) → Stage 1, with caption "first 100 SAC updates: w_qd ≡ 1, reward EMA, α floor".
+  - Box "P1 belief-cond Q^δ" (muted orange) → Stage 4, with caption "feeds per-dim ensemble std as input to Q^δ".
+  - Box "RAHD-A feature pool ~/.mcwm/" (sand) ← Stage 5 (this one is bidirectional: a thin double-headed arrow), captioned "cross-env JSON of accepted features + reward gain".
+
+RIGHT SIDE (validation and constraint):
+  - Box "RAHD-B ΔL_eff stability gate" (deep teal) → Stage 2, captioned "reject candidate if ‖Δβ‖_∞ > τ".
+  - Box "RAHD-C policy-aware fit weights" (deep teal) → Stage 3, captioned "w_i ∝ d^π(s_i, a_i) via kNN density".
+  - Box "RAHD-D mini-rollout reward check" (pale gray, dashed border) → Stage 5, captioned "deferred future work".
+
+At the very bottom of the figure draw a small pale-gray summary box: "Stable + transferable + reward-aligned residual discovery".
+
+Whitespace between modules; arrows neither cross each other nor cross the central pipeline; equations use real Greek letters δ, β, π, τ, α; 6pt minimum label readability; only the labels specified above — no hallucinated text, no extra modules, no duplicated symbols.

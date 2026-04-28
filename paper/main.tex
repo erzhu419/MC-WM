@@ -449,7 +449,23 @@ from trading safety for reward during training spikes.
 
 The training algorithm above is the version evaluated in our main
 results.  Three observed pathologies motivate three further design
-choices, presented here as an integrated module.
+choices, presented here as an integrated module
+(Fig.~\ref{fig:rahd-overview}).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/rahd_overview.pdf}
+\caption{\textbf{RAHD module overview.}  The central residual-fit
+pipeline (top to bottom) is augmented by five external hooks: P0
+warmup gate and reward-EMA normalization on the input, P1
+belief-conditioned $\QD$ critic at the NAU stage, RAHD-A cross-env
+feature pool feeding back into the locked-sparsity refit, RAHD-B
+$\Delta L_{\mathrm{eff}}$ stability gate on candidate features, and
+RAHD-C policy-aware fit weights $w_i\propto d^{\pi}(s_i,a_i)$.  RAHD-D
+(mini-rollout reward validation) is implemented but not wired in this
+paper.}
+\label{fig:rahd-overview}
+\end{figure}
 
 \paragraph{Pathology 1: early-training basin lock-in.}  In our $10$-seed
 study at the matched real-data budget, $\sim\!22\%$ of seeds

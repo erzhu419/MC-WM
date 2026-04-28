@@ -1,0 +1,32 @@
+Create a 1024×1024 white-background NeurIPS-style vector-flat scientific figure showing the RAHD module (Reward-Aligned Hypothesis Discovery) as a radial architecture, not a horizontal pipeline. In the center, draw a deep teal circular core labeled exactly “Residual fit” and “RAHD module” beneath it. Around the core, place six evenly spaced rounded rectangular cards connected by thin deep teal arrows pointing inward, forming a clean orbit/dataflow ring. Use only this palette: deep teal #264653, muted orange #E76F51, sand #F4A261, olive #8DB580, pale gray #E9ECEF, with charcoal #2b2b2b text. No 3D, no shadows, no photorealism, no cartoons, no logos. Helvetica-like sans-serif labels.
+
+Card labels must be exactly:
+“P0 Stability”
+“warmup gate”
+“reward EMA”
+“α floor”
+
+“P1 Critic”
+“belief-conditioned Q^δ”
+“ensemble std per dim”
+
+“RAHD-A”
+“cross-env feature pool”
+“persistent JSON”
+“accept / reject stats”
+
+“RAHD-B”
+“ΔL_eff stability gate”
+“reject if ‖Δβ‖∞ > τ”
+
+“RAHD-C”
+“policy-aware fit weights”
+“w_i ∝ d^π”
+“kNN density”
+
+“RAHD-D”
+“mini-rollout reward validation”
+“γ-discounted check”
+“deferred future work”
+
+Use subtle pale gray connector lines to show that all cards augment the central residual fit. Make RAHD-D visually distinct with a dashed olive border to indicate future work. Include a small title at the top: “Reward-Aligned Hypothesis Discovery (RAHD)”. Add no other text, no legends, no extra labels, and do not spell out Greek letters δ, β, π, τ, γ.
