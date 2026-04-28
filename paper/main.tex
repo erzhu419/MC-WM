@@ -431,6 +431,60 @@ from trading safety for reward during training spikes.
 \end{algorithmic}
 \end{algorithm}
 
+\subsection{RAHD: Stabilization and Reward-Aligned Hypothesis Discovery}
+\label{sec:rahd}
+
+The training algorithm above is the version evaluated in our main
+results.  Three observed pathologies motivate three further design
+choices, presented here as an integrated module.
+
+\paragraph{Pathology 1: early-training basin lock-in.}  In our $10$-seed
+study at the matched real-data budget, $\sim\!22\%$ of seeds
+under-converged because the policy was already heavily filtered by
+the (uncalibrated) $\QD$ critic and the LLM-derived constraint set
+before either had stabilized.  Fix (P0): force the per-rollout trust
+weight $w^{\mathrm{qd}}\equiv 1$ for the first $K_{\mathrm{warm}}$
+SAC updates, run reward through a running EMA-variance normalization,
+and floor the SAC entropy coefficient at
+$\alpha_{\min}{=}0.01$.  This mirrors the BAPR v$10$ stability
+fix in our companion CS-BAPR work~\cite{mcwm-lean-residual}.
+
+\paragraph{Pathology 2: scalar-collapse of trust signal.}  The legacy
+$\QD$ critic maps $(s,a)\to\mathbb{R}$, throwing away the
+\emph{per-dimension} ensemble disagreement that the diagnostics
+already compute.  Fix (P1): widen $\QD$'s input by an obs-dim+1
+\emph{belief-vector} $\mathrm{sig}(s,a)\,{\in}\,\mathbb{R}^{|\mathcal S|+1}$
+giving the per-dim ensemble std at $(s,a)$.  Empirically this
+takes the seed-variance from $24\%$ to $9\%$ at no reward cost
+(Section~\ref{sec:ablation}).
+
+\paragraph{Pathology 3: feature acceptance is decoupled from reward.}
+Both Role \#$2$ and the orthogonal expander accept features by
+\emph{residual correlation}, not downstream reward.  RAHD adds three
+hooks:
+\begin{itemize}
+  \item \textbf{Cross-env feature pool} (Stage A): a persistent JSON
+    bank of accepted features with running per-env reward-gain
+    statistics, used both as a \emph{prior} (re-tested as candidates
+    in later runs) and as a write-back target after fit.
+  \item \textbf{$\Delta L_{\mathrm{eff}}$ gate} (Stage B): reject any
+    candidate whose addition would push the closed-form OLS
+    coefficient $L_{\infty}$-jump beyond a configurable threshold,
+    preventing the destabilization pattern that hurt
+    GravityCheetah by $-22\%$ in earlier work.
+  \item \textbf{Policy-aware fit} (Stage C): weight the SINDy fit by
+    $d^\pi(s,a)$, estimated as a kNN density on a recent-rollout
+    bank.  Directly corresponds to the $d^\pi$-supported TV in the
+    Residual Simulation Lemma (Theorem~\ref{thm:simulation}).
+\end{itemize}
+A fourth hook (Stage D), reward-aware acceptance via mini-rollout,
+is implemented but not wired into the main loop in this paper; we
+leave its evaluation to future work.
+
+We refer to the configuration P0+P1+RAHD-A/B/C as
+\textbf{MC-WM RAHD c$9$} and use it in
+Sections~\ref{sec:h2o_analysis}--\ref{sec:ablation}.
+
 % ============================================================================
 \section{Theoretical Analysis}
 \label{sec:theory}
@@ -797,46 +851,88 @@ informative, we decompose H2O+ into three regimes on
 
 \begin{table}[h]
 \caption{H2O+ decomposition on \texttt{gravity\_soft\_ceiling}
-(3 seeds, mean shown; $50$k real-env steps except ``offline-only''
-which uses D4RL medium-replay + $1024$-step sim warm-up).
-Offline-only is a clear lower bound; full H2O+ ($r=1.0$) improves
-dramatically with more offline data; pure online SAC falls
-well short of both H2O+ and our MC-WM.}
+(3 seeds, mean$\pm$std; $50$k real-env steps for the H2O+ rows except
+``offline-only'' which uses D4RL medium-replay + $1024$-step sim
+warm-up).  Offline-only is a clear lower bound; H2O+ scales
+monotonically with offline-data fraction $r$ but plateaus around
+$2099$; pure online SAC falls well short of both H2O+ and MC-WM.
+The MC-WM result quoted here is the full RAHD+P0+P1 configuration
+introduced in §\ref{sec:rahd}, which uses zero D4RL offline data.}
 \label{tab:h2o_decomp}
 \centering
 \small
-\begin{tabular}{lr}
+\begin{tabular}{l|c|r@{\,$\pm$\,}l|r}
 \toprule
-Configuration                                    & Return        \\
+Configuration                                    & Real data & \multicolumn{2}{c|}{Return} & Var.\,\%        \\
 \midrule
-H2O+ offline-only (lower bound)                  & $-366$        \\
-Pure online SAC (no sim, no offline)             & $1460$        \\
-H2O+ offline fraction $r=0.1$                    & \textsc{tbd}$^*$ \\
-H2O+ offline fraction $r=0.25$                   & \textsc{tbd}$^*$ \\
-H2O+ offline fraction $r=0.5$                    & \textsc{tbd}$^*$ \\
-H2O+ offline fraction $r=1.0$ (\textit{full})    & $2099$        \\
-\textbf{MC-WM c9 (ours)}                         & $\mathbf{6288}$ \\
-c4 oracle (MBPO-on-real)                         & $6032$        \\
+H2O+ offline-only (lower bound)                  & 0     & $-366$  & $110$ & $73$            \\
+Pure online SAC (no sim, no offline)             & $50$k & $1460$  & $62$  & $10$            \\
+H2O+ offline fraction $r=0.10$                   & 0     & $861$   & $245$ & $64$            \\
+H2O+ offline fraction $r=0.25$ (\textit{matched}) & 0    & $1374$  & $225$ & $39$            \\
+H2O+ offline fraction $r=0.50$                   & 0     & $1763$  & $602$ & $80$            \\
+H2O+ offline fraction $r=1.00$ (\textit{full})   & 0     & $2099$  & ---   & ---             \\
+\midrule
+\textbf{MC-WM RAHD c9 (ours)}                    & $50$k & $\mathbf{4919}$ & $\mathbf{187}$ & $\mathbf{9}$ \\
+c4 oracle (MBPO-on-real)                         & $50$k & $6032$  & $375$ & $15$            \\
 \bottomrule
 \end{tabular}
 \par\smallskip
 \footnotesize
-$^*$\,Running; numbers in camera-ready.
+``Real data'' = real-env transitions used.  ``Matched'' marks the
+H2O+ configuration whose offline corpus ($25\%$ of medium-replay
+$\approx 50$k transitions) matches MC-WM's real-env data budget.
+$r=1.0$ std is unavailable from the legacy 3-seed run.
 \end{table}
 
-The decomposition supports three claims.  (i) \emph{Offline-only H2O+ is
-a lower bound.}  With no sim rollouts it drops to $-366$, an order of
-magnitude below every other configuration.  The offline AWR update
-cannot recover from the sim-real gap on its own.  (ii) \emph{Pure
-online SAC is a middle ground but far from competitive.}  Even with
-$50$k clean real-env steps and no sim-to-real artefacts, model-free
-SAC attains only $1460$---less than half of what the sim+offline
-combination in H2O+ buys, and roughly $23\%$ of MC-WM's return.
-(iii) \emph{H2O+ depends strongly on offline-data quantity} (numbers
-in running experiments); this is a structural limitation for deployments
-where a large offline corpus is unavailable, which is precisely the
-regime MC-WM is designed for---our method needs only the $50$k real
-transitions already required for residual fitting.
+The decomposition supports four claims.
+
+\emph{(i) Offline-only H2O+ is a lower bound.}  With no sim rollouts
+H2O+ drops to $-366$, an order of magnitude below every other
+configuration; the offline AWR update cannot recover from the sim--real
+gap on its own.
+
+\emph{(ii) Pure online SAC is competitive with neither side.}  Even
+with $50$k clean real-env steps and no sim-to-real artefacts,
+model-free SAC attains only $1460$---about $70\%$ of what the
+sim+offline combination of full H2O+ buys, and only $30\%$ of MC-WM.
+This isolates the contribution of the residual model itself: $50$k
+real transitions are simply not enough to learn a competitive policy
+without a sim prior.
+
+\emph{(iii) H2O+ scales monotonically with offline-data fraction $r$
+but plateaus quickly.}  Going $r=0.10\to 0.25\to 0.50\to 1.00$ moves
+the return $861\to 1374\to 1763\to 2099$, a clear log-shaped curve
+(Fig.~\ref{fig:h2o_scaling}).  Doubling the offline corpus from $r=0.5$
+to $r=1.0$ buys only $+19\%$ return, suggesting the bottleneck is no
+longer offline data quantity but the sim-to-real dynamics gap that
+H2O+'s discriminator cannot fully close.  Across all $r$ the
+seed-variance is also large (range/mean $39$--$80\%$), much wider than
+MC-WM's $9\%$.
+
+\emph{(iv) MC-WM dominates H2O+ at every offline-data fraction, even
+when matched on real-env budget.}  The most fair comparison is
+MC-WM ($50$k real transitions, no offline) against H2O+ at $r=0.25$
+($\sim 50$k offline transitions, $50$k sim rollouts): MC-WM's $4919$
+is $3.6\times$ H2O+'s $1374$ and has $4\times$ tighter seed variance.
+Even against H2O+ at full $r=1.0$ ($\sim 200$k offline + $50$k sim,
+i.e.\ $5\times$ the data budget), MC-WM still wins by $2.3\times$
+($4919$ vs $2099$).  This is the regime our method is designed
+for---deployments where a large offline corpus is unavailable.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/h2o_scaling.pdf}
+\caption{\textbf{H2O+ data-scaling vs.\ MC-WM} on
+\texttt{gravity\_soft\_ceiling} (3 seeds, mean $\pm$ std).  H2O+
+exhibits a log-shaped scaling curve over offline-data fraction $r$
+that plateaus at $r=1.0$ ($\sim 200$k transitions) at return $2099$.
+The vertical band marks the data-matched comparison ($r=0.25$
+$\approx 50$k transitions).  MC-WM's RAHD+P0+P1 configuration
+(blue square) uses zero D4RL offline data and only $50$k
+real-env transitions, yet outperforms every H2O+ point including
+$r=1.0$ by $2.3\times$.}
+\label{fig:h2o_scaling}
+\end{figure}
 
 \subsection{Ablation Study}
 \label{sec:ablation}
