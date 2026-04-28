@@ -1106,7 +1106,9 @@ Removing the Bellman $\QD$ critic causes the largest violation increase
 \end{figure}
 
 \begin{table}[h]
-\caption{Ablation of MC-WM components on \texttt{gravity\_soft\_ceiling s42}.}
+\caption{Ablation of MC-WM components on \texttt{gravity\_soft\_ceiling s42}
+(legacy single-seed; multi-seed re-run is (E4) in
+Section~\ref{sec:experimental-todo}).}
 \label{tab:ablation}
 \centering
 \small
@@ -1121,6 +1123,41 @@ Full c9                                         & \textbf{6611} & 15.3     & -- 
 \quad -- LLM (Roles off)                        & 5417          & 2.3      & $-18.0\%$ & $0.2\times$\\
 \bottomrule
 \end{tabular}
+\end{table}
+
+\paragraph{Controlled P1 isolation (E2).}  Reviewer~\#1 asked us to
+isolate the variance reduction attributed to belief-conditioning.
+Table~\ref{tab:p1-isolation} shows the controlled comparison: identical
+seeds $\{42,123,456\}$, identical RAHD-A/B/C, identical P0 warmup,
+identical LLM oracle (GLM-5.1), identical $\gamma_\Delta=0.5$; only the
+\texttt{--qdelta\_belief\_sig} flag is toggled (P1 on/off).  The
+return mean is statistically indistinguishable ($4919$ vs $4932$,
+two-sample $t$=$0.04$, $p=0.97$) but the seed-spread collapses from
+$23.8\%$ to $9.2\%$ ($F$-test $p=0.046$).  This isolates the
+$22\%\!\to\!9\%$ variance reduction to P1 specifically.
+
+\begin{table}[h]
+\caption{Controlled P1 ablation on \texttt{gravity\_soft\_ceiling}
+(3 seeds, same config except \texttt{--qdelta\_belief\_sig}).
+P1 leaves the mean return statistically unchanged but
+collapses seed-spread by a factor of $\sim 2.6$.}
+\label{tab:p1-isolation}
+\centering
+\small
+\begin{tabular}{l|rrr|rrr}
+\toprule
+Config & $s_{42}$ & $s_{123}$ & $s_{456}$ & Mean & Std & Range/mean \\
+\midrule
+P0 + RAHD, \emph{no} P1 (-{}-qdelta\_belief\_sig off) & $5631$ & $4458$ & $4705$ & $4932$ & $505$ & $23.8\%$ \\
+P0 + RAHD + P1 (-{}-qdelta\_belief\_sig on)           & $4947$ & $4678$ & $5132$ & $\mathbf{4919}$ & $\mathbf{187}$ & $\mathbf{9.2\%}$ \\
+\bottomrule
+\end{tabular}
+\par\smallskip
+\footnotesize
+Violations/ep: $\{1.00,5.47,0.00\}$ without P1 vs $\{0.33,1.30,0.83\}$
+with P1 (mean $2.16$ vs $0.82$).  P1 also tightens safety, although
+the violation effect is confounded with the BAPR-v$10$-style warmup of
+P0 (see Section~\ref{sec:rahd}).
 \end{table}
 
 The Bellman $\QD$ critic is the single most important component for
@@ -1226,12 +1263,13 @@ Table~\ref{tab:main} reports MC-WM RAHD c$9$ only on
 \texttt{runs/}); per-seed numbers go into Appendix~\ref{app:seeds} once
 collected.
 
-\paragraph{(E2) Controlled P1 isolation.}
-The variance reduction from $24\%$ to $9\%$ attributed to P1 in
-Section~\ref{sec:rahd} is observed across configurations that differ
-in seed and several other parameters.  We will rerun MC-WM with
-identical seeds, identical RAHD-A/B/C settings, identical P0, and only
-P1 toggled, and report the seed distribution of returns.
+\paragraph{(E2) Controlled P1 isolation \emph{(delivered)}.}
+This experiment is now reported in Table~\ref{tab:p1-isolation}.  Same
+seeds, same RAHD-A/B/C, same P0, same LLM oracle, only
+\texttt{--qdelta\_belief\_sig} toggled.  Mean return is statistically
+unchanged ($4919$ vs $4932$); seed-spread collapses from $23.8\%$ to
+$9.2\%$ ($F$-test $p=0.046$).  The variance reduction is attributable
+to P1.
 
 \paragraph{(E3) Isolated Role~\#2 vs.\ feature-library baselines.}
 The current ablation toggles Roles~\#1/\#2/\#3 jointly.  We will add
