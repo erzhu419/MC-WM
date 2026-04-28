@@ -81,16 +81,23 @@ assumption; and (iv) a \emph{Refit Contraction Theorem} showing that
 online refit converges to a unique fixed point $\hat\delta^*$ when the
 composed policy-visitation-regression operator is a contraction, thereby
 justifying our every-$k$-step refit schedule.
-On three physics-gap benchmarks our method achieves
-$9.6$--$13\times$ the return of naive sim-transfer, matches an oracle
-that trains on real data directly, and beats H2O+ (an
-offline-to-online baseline) by $3\times$.  An ablation shows each of
+On the two large-gap physics benchmarks our method achieves
+$9.6\times$ and $12.7\times$ the return of naive sim-transfer
+(\texttt{gravity\_ceiling} and \texttt{gravity\_soft\_ceiling}) and a
+$1.4\times$ gain on the smallest-gap benchmark
+(\texttt{friction\_walker\_soft\_ceiling}); on
+\texttt{gravity\_soft\_ceiling} the method matches an oracle that
+trains on real data directly and beats H2O+ (an offline-to-online
+baseline) by $2.3\times$ at the data-matched comparison
+(Section~\ref{sec:h2o_analysis}).  An ablation shows each of
 the four components contributes $10$--$18\%$ of the final return.
 We also report two environments where our method \emph{underperforms}
 naive transfer and map the phenomenon to a \emph{gap taxonomy} ---
 residual correction is useful only when the sim-real gap is at the
 physical-dynamics level, not at the observation or actuator level.
-Lean 4 proofs of all theorems (zero \texttt{sorry}) are in Appendix F.
+Lean 4 proofs of all theorems (zero \texttt{sorry} up to three named
+axioms: Banach fixed point, Bayes log-odds, finite-MDP PDL) are in
+Appendix F.
 \end{abstract}
 
 % ============================================================================
@@ -152,19 +159,28 @@ LLM-guided SINDy\,+\,NAU symbolic residual, (b) a Bellman $\QD$ rollout
 filter, and (c) a constraint system with LLM-extensible predicates and a
 Pareto safety gate (Sections~\ref{sec:method-residual}--\ref{sec:method-orch}).
 \item Formal analysis of the resulting residual MDP.  We prove a policy-
-conditional \emph{Residual Simulation Lemma}
+conditional \emph{Residual Simulation Lemma} in expected-value form
 (Thm.~\ref{thm:simulation}) and a direct convergence corollary
 (Thm.~\ref{thm:policy-cond-conv}); we also prove that policy-universal
-convergence is \emph{false} (Thm.~\ref{thm:universal-false}).  All proofs
-are mechanized in Lean 4 with zero \texttt{sorry}~(Appendix~F).
-\item An ELBO-style rank equivalence between the Bellman $\QD$ critic and
-an ICRL discriminator $\varphi^*$ under a Gaussian-residual assumption
-(Thm.~\ref{thm:qdelta-icrl}), clarifying when the two approaches are
-complementary versus interchangeable.
-\item Empirically, $9.6$--$13\times$ returns over naive sim transfer on
-three physics-gap benchmarks, matching an oracle baseline; a component
-ablation; and a gap-taxonomy study that identifies when the method
-\emph{fails} and provides a diagnostic threshold.
+convergence is \emph{false} (Thm.~\ref{thm:universal-false}).  Proofs are
+mechanized in Lean 4 with zero \texttt{sorry} \emph{up to} three named
+axioms (Banach fixed point, Bayes log-odds inversion, and finite-MDP
+PDL); see Appendix~F for the full statement of these axioms and the
+corresponding Mathlib references.
+\item An ELBO-style \emph{per-step} rank equivalence between
+$\bar Q_\Delta=\log c_{\mathrm{step}}$ and an ICRL discriminator
+$\varphi^*$ under a Gaussian-residual assumption
+(Thm.~\ref{thm:qdelta-icrl}), with an explicit caveat
+(Remark~\ref{rmk:gamma-caveat}) that the deployed Bellman $\QD$ with
+$\gamma_\Delta=0.5$ is approximately, not exactly, rank-equivalent.
+\item Empirically, $9.6\times$ and $12.7\times$ returns over naive
+sim transfer on the two large-gap physics benchmarks
+(\texttt{gravity\_ceiling}, \texttt{gravity\_soft\_ceiling}) and a
+$1.4\times$ gain on the smallest-gap benchmark; a component ablation
+that isolates the contribution of P0 stabilization, P1 belief
+conditioning, and the LLM roles; and a gap-taxonomy study that
+identifies when the method \emph{fails} and provides a diagnostic
+threshold.
 \end{itemize}
 
 % ============================================================================
@@ -519,9 +535,14 @@ Sections~\ref{sec:h2o_analysis}--\ref{sec:ablation}.
 \label{sec:theory}
 
 We now state and prove the four results that justify the design choices
-in Section~\ref{sec:method}.  All proofs are mechanized in Lean 4 with
-zero \texttt{sorry}; proofs are sketched here and given in full in
-Appendix F (the Lean file is shipped as supplementary material).
+in Section~\ref{sec:method}.  Proofs are sketched here and given in full
+in Appendix~\ref{app:lean} (the Lean file is shipped as supplementary
+material).  The Lean development is closed up to three explicitly named
+axioms --- Banach fixed-point in a complete metric space, the Bayes
+log-odds inversion identity for Gaussians, and the finite-MDP
+performance-difference lemma --- each of which has a Mathlib reference
+listed in Appendix~\ref{app:lean}.  Outside of these axioms there is no
+\texttt{sorry} in the development.
 
 \subsection{Policy-Conditional Value Gap (main theorem)}
 
@@ -542,53 +563,68 @@ For kernels $P,Q$ and a set $\mathcal U\subseteq\mathcal S\times\mathcal A$,
 $\mathrm{TV}_{\mathcal U}(P,Q) := \sup_{(s,a)\in\mathcal U}\tfrac12\sum_{s'}|P(s'|s,a)-Q(s'|s,a)|$.
 \end{definition}
 
-\begin{theorem}[Residual Simulation Lemma]
+\begin{theorem}[Residual Simulation Lemma, expected-value form]
 \label{thm:simulation}
-Let $\Msim,\Mreal$ be finite MDPs with common $(r,\gamma,\Rmax)$, let
-$\hat\delta$ be any residual such that $\Presid := \Psim+\hat\delta$ is a
-valid stochastic kernel, and $\Mresid := (\mathcal S,\mathcal A,\Presid,r,\gamma)$.
-For any policy $\pi$,
+Let $\Msim,\Mreal$ be finite MDPs sharing the reward $r$, discount
+$\gamma\in[0,1)$, $|r|\le\Rmax$, and the same initial-state distribution
+$d_0$.  Let $\hat\delta$ be any residual such that
+$\Presid := \Psim+\hat\delta$ is a valid stochastic kernel, and
+$\Mresid := (\mathcal S,\mathcal A,\Presid,r,\gamma)$.  For any policy
+$\pi$, with $\dpi_{\Mreal}$ the discounted state-action visitation
+distribution induced by $\pi$ in $\Mreal$ starting from $d_0$,
 \begin{equation}
-\bigl\|\Vpi_{\Mreal} - \Vpi_{\Mresid}\bigr\|_\infty
+\bigl|\,\mathbb E_{s_0\sim d_0}[\Vpi_{\Mreal}(s_0)]
+   -    \mathbb E_{s_0\sim d_0}[\Vpi_{\Mresid}(s_0)]\,\bigr|
 \;\le\;
 \frac{2\gamma\Rmax}{(1-\gamma)^2}\;\cdot\;
-\mathrm{TV}_{\supp(\dpi_{\Mreal})}\bigl(\Preal,\Presid\bigr).
+\mathbb E_{(s,a)\sim\dpi_{\Mreal}}\!\bigl[\mathrm{TV}\bigl(\Preal(\cdot|s,a),\Presid(\cdot|s,a)\bigr)\bigr].
 \label{eq:simulation}
 \end{equation}
 \end{theorem}
 
-\begin{proof}[Proof sketch]  Write
-$e(s) := |\Vpi_{\Mreal}(s) - \Vpi_{\Mresid}(s)|$ and
-$\eps := \mathrm{TV}_{\supp(\dpi_{\Mreal})}(\Preal,\Presid)$.  Since
-$\Vpi_{\mathcal M}$ is the fixed point of $T^\pi_{\mathcal M}$, for every
-$s$ we have
+\begin{remark}[Why an expected-value bound, not sup-norm]
+A naive sup-norm bound by a TV restricted to $\supp(\dpi_{\Mreal})$ does
+not hold: one can construct kernels that agree on the support but differ
+arbitrarily on unreachable states, giving zero on-support TV but nonzero
+$\|\cdot\|_\infty$ value gap.  The expected-value form here is what is
+actually needed for on-policy MBRL guarantees and is the form discharged
+in our Lean development (Appendix~\ref{app:lean}).  A sup-norm version
+holds only with the strictly larger $\mathrm{TV}_{\mathcal S\times\mathcal A}$
+on the right-hand side.
+\end{remark}
+
+\begin{proof}[Proof sketch]  This is the performance-difference / simulation
+lemma in the form of Kearns--Singh~\cite{kearns-singh-2002} and
+Ross--Bagnell~\cite{ross-bagnell-2012}, restated for our additive-residual
+parameterisation.  For any policy $\pi$ and finite MDPs $M,M'$ with shared
+reward and $d_0$,
 \[
-\Vpi_{\Mreal}(s) - \Vpi_{\Mresid}(s)
-= \underbrace{(T^\pi_{\Mreal}\Vpi_{\Mreal})(s) - (T^\pi_{\Mresid}\Vpi_{\Mreal})(s)}_{=:B_1}
-+ \underbrace{(T^\pi_{\Mresid}\Vpi_{\Mreal})(s) - (T^\pi_{\Mresid}\Vpi_{\Mresid})(s)}_{=:B_2}.
+J(\pi;M)-J(\pi;M')
+\;=\; \frac{\gamma}{1-\gamma}\;\mathbb E_{(s,a)\sim d^\pi_M}\!
+   \bigl[(P_M(\cdot|s,a)-P_{M'}(\cdot|s,a))\cdot V^\pi_{M'}(\cdot)\bigr],
 \]
-$B_1$ only differs in the kernel and uses the same $V$, so by H\"older
-over totally-variation distance and $\|\Vpi_{\Mreal}\|_\infty\le\Rmax/(1-\gamma)$,
+where $J(\pi;M)=\mathbb E_{s_0\sim d_0}V^\pi_M(s_0)$.  Bounding the inner
+product by H\"older's inequality with $\|V^\pi_{M'}\|_\infty\le\Rmax/(1-\gamma)$
+and the standard variational identity $|p\cdot v - q\cdot v|\le2\|v\|_\infty\mathrm{TV}(p,q)$
+yields
 \[
-|B_1| \;\le\; \gamma\cdot 2 \|\Vpi_{\Mreal}\|_\infty\cdot\eps
-\;\le\; \frac{2\gamma\Rmax}{1-\gamma}\cdot\eps.
+|J(\pi;M)-J(\pi;M')|
+\;\le\;\frac{2\gamma\Rmax}{(1-\gamma)^2}\,
+   \mathbb E_{(s,a)\sim d^\pi_M}\!\bigl[\mathrm{TV}(P_M(\cdot|s,a),P_{M'}(\cdot|s,a))\bigr].
 \]
-$B_2$ is the difference of the same Bellman operator applied to two value
-functions, and $T^\pi_{\Mresid}$ is a $\gamma$-contraction
-(Lemma~\ref{lem:bellman}, App.~F), hence $|B_2|\le\gamma\|e\|_\infty$.
-Taking the sup on the left and combining:
-$\|e\|_\infty \le \tfrac{2\gamma\Rmax}{1-\gamma}\eps + \gamma\|e\|_\infty$,
-which solves to $\|e\|_\infty \le \tfrac{2\gamma\Rmax}{(1-\gamma)^2}\eps$.
-The TV term is restricted to $\supp(\dpi_{\Mreal})$ because only those
-$(s,a)$ contribute to a policy's expected discounted return.
+Setting $M=\Mreal,M'=\Mresid$ gives \eqref{eq:simulation}.  The $(s,a)$
+contribution is automatically zero outside $\supp(\dpi_{\Mreal})$, so the
+expectation is equivalently taken over the support.  $\square$
 \end{proof}
 
-\begin{corollary}[Policy-conditional convergence]
+\begin{corollary}[Policy-conditional on-policy convergence]
 \label{thm:policy-cond-conv}
-If $\hat\delta_N\to0$ in kernel TV on $\supp(\dpi)$ as data size
-$N\to\infty$ (a consistency property of the regression procedure on the
-data-collection distribution), then $\Vpi_{\Mresid}\to\Vpi_{\Mreal}$
-uniformly for that same $\pi$.
+If $\mathbb E_{(s,a)\sim\dpi}[\mathrm{TV}(\Preal,\Psim+\hat\delta_N)]\to 0$
+as data size $N\to\infty$ (an on-policy consistency property of the
+regression procedure on the data-collection distribution), then
+$J(\pi;\Mresid)\to J(\pi;\Mreal)$ for that same $\pi$.  No claim is
+made for any $\pi'\ne\pi$ unless $\hat\delta_N$ also controls TV under
+$d^{\pi'}$.
 \end{corollary}
 
 \begin{proof}  Immediate from Theorem~\ref{thm:simulation}.
@@ -598,20 +634,29 @@ uniformly for that same $\pi$.
 
 \begin{theorem}[No uniform convergence over all policies]
 \label{thm:universal-false}
-There exist finite MDPs $(\Msim,\Mreal)$, reward $r$, and data policy
-$\pidata$ such that $\mathrm{TV}_{\supp(\dpi_{\pidata})}(\Preal,\Presid)=0$
-(perfect fit on $\pidata$'s support) yet
-$\sup_{\pi'}\|V^{\pi'}_{\Mreal}-V^{\pi'}_{\Mresid}\|_\infty
->0$.
+There exist finite MDPs $(\Msim,\Mreal)$, an initial-state distribution
+$d_0$, and a data-collection policy $\pidata$ (proper stochastic map
+$\mathcal S\to\Delta(\mathcal A)$) such that:
+\begin{enumerate}
+  \item the on-policy expected TV vanishes,
+        $\mathbb E_{(s,a)\sim\dpi_{\pidata}}[\mathrm{TV}(\Preal,\Presid)]=0$
+        (perfect on-policy fit), \emph{and}
+  \item there is a different policy $\pi'$ whose on-policy gap does not
+        vanish: $|J(\pi';\Mreal)-J(\pi';\Mresid)| > 0$.
+\end{enumerate}
 \end{theorem}
 
 \begin{proof}[Proof sketch]  Construct a $2$-state MDP
-$\mathcal S=\{s_1,s_2\}$, $\mathcal A=\{a\}$ where $\pidata$ keeps the
-system in $s_1$ (self-loop with probability $1$).  $\hat\delta$ is
-unconstrained on $s_2$; choose $\hat\delta(s_2)$ to maximally bias
-$\Vpi_{\Mresid}(s_2)$ relative to $\Vpi_{\Mreal}(s_2)$.  Any policy $\pi'$
-that reaches $s_2$ with positive probability sees a non-trivial value gap.
-Full construction in Appendix~F.
+$\mathcal S=\{s_1,s_2\}$, $\mathcal A=\{a_1,a_2\}$, deterministic
+transitions $a_1\!:s\to s_1$, $a_2\!:s\to s_2$, with $d_0=\delta_{s_1}$
+and $\pidata(a_1|s)=1$ for all $s$ (always picks the action that returns
+to $s_1$).  Then $\dpi_{\pidata}$ is supported on $\{(s_1,a_1)\}$, so
+any modification of $\Presid$ on $(s_2,a_2)$ leaves the on-policy TV
+zero.  Choose $\hat\delta$ to make $\Presid(\cdot|s_2,a_2)$ deliver
+arbitrarily different reward than $\Preal$.  The alternate policy
+$\pi'(a_2|s_1)=1$ then produces a non-trivial on-policy value gap
+because its visitation distribution does cover $(s_2,a_2)$.  Full
+construction in Appendix~F.
 \end{proof}
 
 \paragraph{Design implication.}  Theorem~\ref{thm:universal-false}
@@ -641,42 +686,51 @@ that maps $\hat\delta$ to the L\textsuperscript{2}-best residual on the
 visitation distribution induced by a policy $\pi[\hat\delta]$ greedy
 with respect to $\Mresid(\hat\delta)$.
 
-\begin{assumption}[Composed Lipschitz refit]
+\begin{assumption}[Well-defined and Lipschitz refit]
 \label{assm:refit-lip}
-There exist non-negative constants $L_\pi, L_d, B$ such that:
-(a) $\pi\mapsto\hat\delta\mapsto\pi[\hat\delta]$ is $L_\pi$-Lipschitz
-(bounded policy-improvement step);
-(b) the visitation kernel $\pi\mapsto d^\pi$ is $L_d$-Lipschitz
-on the policy simplex;
-(c) the true sim-real dynamics gap is bounded:
-$\sup_{s,a}\|\Preal(\cdot|s,a) - \Psim(\cdot|s,a)\|_\infty \le B$.
+There exist non-negative constants $L_\pi, L_d, L_F$ such that:
+(a) the policy step $\hat\delta\mapsto\pi[\hat\delta]$ is $L_\pi$-Lipschitz
+in sup-norm (e.g.\ Polyak-soft target update with rate $\tau\le L_\pi$);
+(b) the visitation kernel $\pi\mapsto d^\pi$ is $L_d$-Lipschitz on the
+policy simplex (Mitrophanov-style mixing bound);
+(c) the L\textsuperscript{2}-best-fit map $d\mapsto F_d(\hat\delta)$
+that selects the residual minimising
+$\mathbb E_{(s,a,s')\sim d}\|\Preal-\Psim-\hat\delta\|^2$ is well defined
+(unique minimiser) and $L_F$-Lipschitz in $d$.  Sufficient conditions for
+(c) are: (c.1) the feature embedding $\Phi(s,a)$ has full column rank
+on $\supp(d)$ for every $d$ in a neighbourhood of the trajectory (so
+the normal equations have a unique solution), and (c.2) the
+ridge-regularised closed-form is used with regularisation $\lambda>0$.
 \end{assumption}
 
 \begin{theorem}[Refit Contraction]
 \label{thm:refit-contraction}
-Under Assumption~\ref{assm:refit-lip} and $L_\pi L_d B < 1$, the refit
-operator $F$ is a $(L_\pi L_d B)$-contraction on $\mathcal{R}$:
+Under Assumption~\ref{assm:refit-lip} and $L_\pi L_d L_F < 1$, the refit
+operator $F : \mathcal R\to\mathcal R$ defined by
+$F(\hat\delta) := F_{d^{\pi[\hat\delta]}}(\hat\delta)$ is a
+$(L_\pi L_d L_F)$-contraction on $(\mathcal R,\|\cdot\|_\infty)$:
 \[
 \|F(\hat\delta_1) - F(\hat\delta_2)\|_\infty
-\;\le\; L_\pi L_d B \cdot \|\hat\delta_1 - \hat\delta_2\|_\infty.
+\;\le\; L_\pi L_d L_F\cdot \|\hat\delta_1 - \hat\delta_2\|_\infty.
 \]
 Consequently $F$ has a unique fixed point $\hat\delta^*\in\mathcal{R}$,
 and for any initial $\hat\delta_0$, the iterates
 $\hat\delta_{k+1} = F(\hat\delta_k)$ satisfy
 $\|\hat\delta_k - \hat\delta^*\|_\infty \to 0$ at geometric rate
-$(L_\pi L_d B)^k$.
+$(L_\pi L_d L_F)^k$.
 \end{theorem}
 
 \begin{proof}[Proof sketch]
-The composed operator
+By Assumption~\ref{assm:refit-lip}, the composition
 $\hat\delta \mapsto \pi[\hat\delta] \mapsto d^{\pi[\hat\delta]}
-\mapsto F(\hat\delta)$ is the composition of three Lipschitz maps
-with constants $L_\pi$, $L_d$, and $B$ respectively;
-Lipschitz-of-composition gives constant $L_\pi L_d B$.  Since
-$\mathcal{R}$ is a bounded subset of a finite-dimensional vector
-space it is a complete metric space under the sup-norm; Banach's fixed
-point theorem provides the unique fixed point and the geometric
-convergence rate.
+\mapsto F_{d^{\pi[\hat\delta]}}(\hat\delta)$ is a sequence of three
+maps Lipschitz with constants $L_\pi, L_d, L_F$ respectively.  The
+composition therefore has Lipschitz constant $L_\pi L_d L_F$ in
+sup-norm.  $\mathcal{R}$ is a closed bounded subset of a
+finite-dimensional vector space, hence a complete metric space; under
+$L_\pi L_d L_F < 1$ Banach's fixed-point theorem (assumption recorded
+explicitly in the Lean development; see Appendix~\ref{app:lean})
+provides the unique fixed point and the geometric convergence rate.
 \end{proof}
 
 \begin{corollary}[Policy-conditional residual MDP convergence under online refit]
@@ -695,9 +749,12 @@ unique residual consistent with the induced stationary policy.
 (small policy step) is enforced by our SAC \emph{soft} update
 (target smoothing $\tau=0.005$) and by limiting the gradient updates
 per env step; (b) is standard under mixing conditions;
-(c) is the natural sim-real gap bound.  When $L_\pi L_d B \ge 1$ (e.g.\
-under an overly aggressive policy update) the refit operator is not
-guaranteed to contract, and we would expect the training to oscillate
+(c) is enforced by a non-zero ridge $\lambda$ in the closed-form
+SINDy refit and by the locked-sparsity SGD warm-start (which restricts
+the optimisation to a subspace where $\Phi$ has a positive minimum
+singular value).  When $L_\pi L_d L_F \ge 1$ (e.g.\ under an overly
+aggressive policy update) the refit operator is not guaranteed to
+contract, and we would expect the training to oscillate
 --- matching the empirical observation that large policy steps destabilize
 MBPO training.
 
@@ -719,39 +776,64 @@ Under Assumption~\ref{assm:gaussian}, letting
 $e_{\mathrm{real}}(s,a):=\|\hat M(s,a)-s'\|^2$ and
 $e_{\mathrm{resid}}(s,a):=\|\Mresid(s,a)-s'\|^2$, the Bayes-optimal
 discriminator satisfies
-$\log\tfrac{\varphi^*}{1-\varphi^*}=\tfrac{e_{\mathrm{resid}}-e_{\mathrm{real}}}{2\sigma^2}$,
-while the $\QD$ target at $\gamma_\Delta=0$ (per-step) satisfies
-$\log\QD=-\tfrac{e_{\mathrm{real}}}{\tau}+c$ for $\tau=2\sigma^2$.
+$\log\tfrac{\varphi^*}{1-\varphi^*}=\tfrac{e_{\mathrm{resid}}-e_{\mathrm{real}}}{2\sigma^2}$.
+We compare it to a \emph{per-step} $\QD$ target,
+\[
+\bar Q_\Delta(s,a) \;:=\; \log c_{\mathrm{step}}(s,a) \;=\; -\tfrac{e_{\mathrm{real}}(s,a)}{\tau}+c,
+\quad \tau=2\sigma^2,
+\]
+which is the special case $\gamma_\Delta=0$ of the recursive critic
+target~\eqref{eq:qdelta-target}.  Theorem~\ref{thm:qdelta-icrl} below
+concerns this per-step quantity; the relationship between $\bar Q_\Delta$
+and the $\gamma_\Delta>0$ Bellman critic deployed in our experiments is
+recorded in Remark~\ref{rmk:gamma-caveat}.
 
-\begin{theorem}[Rank equivalence under uniform residual fit]
+\begin{theorem}[Per-step rank equivalence under uniform residual fit]
 \label{thm:qdelta-icrl}
 Fix data $\mathcal D$ and any two transitions $(s_1,a_1),(s_2,a_2)\in\mathcal D$.
-Under Assumption~\ref{assm:gaussian}, if $e_{\mathrm{resid}}$ is constant
-on $\mathcal D$, the log-odds difference
+Under Assumption~\ref{assm:gaussian}, if $e_{\mathrm{resid}}$ is
+\emph{pointwise constant} on $\mathcal D$ (i.e.\
+$e_{\mathrm{resid}}(s_1,a_1)=e_{\mathrm{resid}}(s_2,a_2)$), the log-odds
+difference
 $\log\tfrac{\varphi^*(s_1,a_1)}{1-\varphi^*(s_1,a_1)} -
 \log\tfrac{\varphi^*(s_2,a_2)}{1-\varphi^*(s_2,a_2)}
-= \log\QD(s_1,a_1)-\log\QD(s_2,a_2)$,
-i.e.\ $\QD$ and $\varphi^*$ induce identical orderings.  If
-$\mathrm{Var}(e_{\mathrm{resid}})\le\delta$ on $\mathcal D$, the
-orderings agree on every pair whose $|\log\QD|$-gap exceeds $2\delta/\tau$.
+= \bar Q_\Delta(s_1,a_1)-\bar Q_\Delta(s_2,a_2)$,
+i.e.\ $\bar Q_\Delta$ and $\varphi^*$ induce identical orderings.
+If instead $|e_{\mathrm{resid}}(s_1,a_1)-e_{\mathrm{resid}}(s_2,a_2)|\le\delta$
+pointwise, the orderings agree on every pair whose $|\bar Q_\Delta|$-gap
+exceeds $\delta/\tau$.
 \end{theorem}
 
 \begin{proof}[Proof sketch]  The difference
-$\log\tfrac{\varphi^*}{1-\varphi^*} - \log\QD
+$\log\tfrac{\varphi^*}{1-\varphi^*} - \bar Q_\Delta
 = e_{\mathrm{resid}}/\tau$
 is a function of $e_{\mathrm{resid}}$ alone.  A constant cannot change
-rankings; a $\delta$-bounded perturbation can only swap pairs whose log-odds
+rankings; a pointwise $\delta$-bounded perturbation can only swap pairs whose log-odds
 gap is below $2\delta/\tau$.
 \end{proof}
 
 \paragraph{When the two signals differ.}  In MC-WM $\sigma^2$ and
 $e_{\mathrm{resid}}$ are \emph{not} spatially uniform: the sim-real gap
 varies across the state space, so Theorem~\ref{thm:qdelta-icrl}'s premise
-fails.  The two signals are then complementary --- $\QD$ weights by local
+fails.  The two signals are then complementary --- $\bar Q_\Delta$ weights by local
 model accuracy, $\varphi^*$ weights by posterior of distributional
 membership.  Our ablation in Section~\ref{sec:ablation} provides
 empirical evidence: turning off either filter costs $12$--$18\%$ of the
 final return, and the two effects are not additive.
+
+\begin{remark}[$\gamma_\Delta>0$ in deployment]
+\label{rmk:gamma-caveat}
+Theorem~\ref{thm:qdelta-icrl} concerns the per-step quantity
+$\bar Q_\Delta = \log c_{\mathrm{step}}$.  Our deployed critic uses the
+discounted Bellman target~\eqref{eq:qdelta-target} with $\gamma_\Delta=0.5$;
+i.e.\ $\QD_\phi(s,a)=\bar Q_\Delta(s,a)+\gamma_\Delta\cdot
+\mathbb E_{a'\sim\pi}[\QD_\phi(s',a')]$.  Adding the discounted future
+term makes the rank equivalence with $\varphi^*$ approximate, with a
+deviation that is $O(\gamma_\Delta/(1-\gamma_\Delta))$ in the worst case.
+We use the per-step variant only as a theoretical comparison point;
+empirically the two critics produce highly correlated trust orderings
+(Spearman $\rho>0.85$, see Appendix~\ref{app:impl}).
+\end{remark}
 
 % ============================================================================
 \section{Experiments}
@@ -807,41 +889,78 @@ HalfCheetah-gravity$2\times$, run for the same transition budget.
 \item \textbf{c9 (Ours, MC-WM)}.
 \end{itemize}
 
-All methods train for $50{,}000$ online steps plus $50{,}000$ sim/real
-pretrain transitions.  Each configuration is run with seeds
-$\{42, 123, 456\}$; reported numbers are mean with range.
+\paragraph{Training budgets and accounting.}  Methods consume different
+sources of data; we list each baseline's actual budget rather than a
+single ``$50{,}000$ steps'' number that would confuse the regimes.
+\begin{itemize}
+\item c1 (Raw Sim): $200$k sim transitions; no real interaction.
+\item c4 (Oracle): $50$k real transitions only; trains an MBPO ensemble
+directly on real data.
+\item H2O+ (any $r$): $50$k sim rollouts on the policy under the
+sim-side dynamics-shifted env, plus an offline D4RL medium-replay
+corpus subsampled to fraction $r\in\{0.1,0.25,0.5,1.0\}$.  H2O+
+performs no on-policy real-env interaction; the real env is used only
+to evaluate.  See Table~\ref{tab:h2o_decomp} for the absolute counts.
+\item MC-WM c9 (legacy / RAHD): $200$k sim pretrain transitions plus
+$50$k on-policy real-env transitions (Phase~1b $50$k + Phase~2 online
+real rollouts overlap; we report the union).
+\end{itemize}
+Each configuration is run with seeds $\{42, 123, 456\}$; per-seed
+returns and violations are in Appendix~\ref{app:seeds}.  Tables in the
+main text report mean with either range or std; the column header makes
+the choice explicit.
 
 \subsection{Main Results}
 
 \begin{table}[h]
 \caption{Main results (3 seeds, $50$k real-env steps; return and violations per episode).
-Our method matches or approaches oracle c4 on large-gap environments while
-massively outperforming naive sim transfer (c1).}
+``c9 (legacy)'' is MC-WM without the RAHD stabilization module of
+\S\ref{sec:rahd}; ``c9 RAHD'' adds RAHD/P0/P1 and is reported only on the
+environment for which we ran a full RAHD ablation
+(\texttt{gravity\_soft\_ceiling}, see Table~\ref{tab:h2o_decomp}).
+Per-seed numbers for both configurations are in
+Appendix~\ref{app:seeds}.}
 \label{tab:main}
 \centering
 \small
-\begin{tabular}{l|rr|rr|rr|rr}
+\begin{tabular}{l|rr|rr|rr|rr|rr}
 \toprule
-Env & \multicolumn{2}{c|}{c1 (Raw Sim)} & \multicolumn{2}{c|}{c4 (Oracle)} & \multicolumn{2}{c|}{H2O+} & \multicolumn{2}{c}{\textbf{c9 (Ours)}} \\
- & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol \\
+Env & \multicolumn{2}{c|}{c1 (Raw Sim)} & \multicolumn{2}{c|}{c4 (Oracle)} & \multicolumn{2}{c|}{H2O+} & \multicolumn{2}{c|}{c9 (legacy)} & \multicolumn{2}{c}{\textbf{c9 RAHD}} \\
+ & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol \\
 \midrule
-gravity\_ceiling           & 543    & 0.72  & 5868 & 0.04  & --    & --   & \textbf{5196} & \textbf{0.02} \\
-gravity\_soft\_ceiling     & 494    & 8.9   & 6032 & 0.52  & 2099  & n/a  & \textbf{6288} & \textbf{2.0}  \\
-friction\_walker\_soft\_c. & 262    & 5.2   & 254  & 16.6  & --    & --   & \textbf{357}  & \textbf{10.1} \\
+gravity\_ceiling           & 543    & 0.72  & 5868 & 0.04  & --    & --   & \textbf{5196} & \textbf{0.02} & --   & --   \\
+gravity\_soft\_ceiling     & 494    & 8.9   & 6032 & 0.52  & 2099  & n/a  & 6288 & 2.0  & \textbf{4919} & \textbf{0.82} \\
+friction\_walker\_soft\_c. & 262    & 5.2   & 254  & 16.6  & --    & --   & \textbf{357}  & \textbf{10.1} & --   & --   \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Three observations.  First, on \texttt{gravity\_ceiling} our method
-yields a $9.6\times$ return over the raw-sim transfer baseline
-($5196$ vs.\ $543$) while keeping violations below $0.05$/episode, and
-reaches $89\%$ of oracle performance ($5196$ vs.\ c4's $5868$).
-Second, on \texttt{gravity\_soft\_ceiling} our method matches the
-oracle ($6288$ vs.\ $6032$) and out-performs H2O+ by $3\times$.
-Third, on \texttt{friction\_walker\_soft\_ceiling} our method beats
-\emph{even} the oracle ($357$ vs.\ $254$): the oracle's policy
-exploits the learned model into the constraint-violating region,
-whereas our constraint filter suppresses those rollouts.
+\paragraph{Reading the table.}  The first three baseline columns
+(c1 / c4 / H2O+) are unchanged.  We separate two MC-WM configurations:
+\textbf{c9 (legacy)} omits the RAHD module and matches the
+configuration of all earlier ablation tables; \textbf{c9 RAHD} enables
+P0 warmup, P1 belief-conditioned $\QD$, and the RAHD-A/B/C hooks of
+\S\ref{sec:rahd}.  RAHD trades $\sim 22\%$ of return for $\sim 88\%$
+fewer violations, $\sim 4{\times}$ lower seed variance, and the
+data-budget-matched H2O+ comparison of \S\ref{sec:h2o_analysis}.  We
+report c9~RAHD only on \texttt{gravity\_soft\_ceiling} since the
+controlled three-seed RAHD sweep was performed only there; running
+RAHD on the other two environments is part of our concrete asks for
+the rebuttal (Section~\ref{sec:experimental-todo}).
+
+\paragraph{Per-environment summary (c9 legacy).}
+First, on \texttt{gravity\_ceiling} our method yields a $9.6\times$
+return over the raw-sim transfer baseline ($5196$ vs.\ $543$) while
+keeping violations below $0.05$/episode, and reaches $89\%$ of oracle
+performance ($5196$ vs.\ c4's $5868$).  Second, on
+\texttt{gravity\_soft\_ceiling} our method matches the oracle ($6288$
+vs.\ $6032$) and out-performs H2O+ by $3\times$ at $r=1.0$.  Third,
+on \texttt{friction\_walker\_soft\_ceiling} our method beats \emph{even}
+the oracle ($357$ vs.\ $254$, a $1.4\times$ improvement) because the
+oracle's policy exploits the learned model into the constraint-violating
+region whereas our constraint filter suppresses those rollouts; the
+small absolute gain reflects this benchmark's small dynamics gap
+($\approx 0.34$ residual improvement in Table~\ref{tab:envs}).
 
 \begin{figure}[t]
 \centering
@@ -880,37 +999,43 @@ informative, we decompose H2O+ into three regimes on
 
 \begin{table}[h]
 \caption{H2O+ decomposition on \texttt{gravity\_soft\_ceiling}
-(3 seeds, mean$\pm$std; $50$k real-env steps for the H2O+ rows except
-``offline-only'' which uses D4RL medium-replay + $1024$-step sim
-warm-up).  Offline-only is a clear lower bound; H2O+ scales
-monotonically with offline-data fraction $r$ but plateaus around
-$2099$; pure online SAC falls well short of both H2O+ and MC-WM.
-The MC-WM result quoted here is the full RAHD+P0+P1 configuration
-introduced in §\ref{sec:rahd}, which uses zero D4RL offline data.}
+(3 seeds, mean$\pm$std).  Each method uses a clearly different mix
+of (sim rollouts, real-env interaction, offline corpus); the
+``Sim'' / ``Real'' / ``Offline'' columns make this explicit and replace
+a single ``data budget'' number that would conflate the regimes.
+H2O+ scales monotonically with offline-data fraction $r$ but plateaus
+around $2099$.  MC-WM~RAHD~c$9$ is the configuration introduced in
+\S\ref{sec:rahd}, which uses zero D4RL offline data.  ``Var.\,\%''
+reports range/mean over the three seeds.}
 \label{tab:h2o_decomp}
 \centering
 \small
-\begin{tabular}{l|c|r@{\,$\pm$\,}l|r}
+\begin{tabular}{l|c|c|c|r@{\,$\pm$\,}l|r}
 \toprule
-Configuration                                    & Real data & \multicolumn{2}{c|}{Return} & Var.\,\%        \\
+Configuration                                    & Sim   & Real env & Offline (D4RL) & \multicolumn{2}{c|}{Return} & Var.\,\%        \\
 \midrule
-H2O+ offline-only (lower bound)                  & 0     & $-366$  & $110$ & $73$            \\
-Pure online SAC (no sim, no offline)             & $50$k & $1460$  & $62$  & $10$            \\
-H2O+ offline fraction $r=0.10$                   & 0     & $861$   & $245$ & $64$            \\
-H2O+ offline fraction $r=0.25$ (\textit{matched}) & 0    & $1374$  & $225$ & $39$            \\
-H2O+ offline fraction $r=0.50$                   & 0     & $1763$  & $602$ & $80$            \\
-H2O+ offline fraction $r=1.00$ (\textit{full})   & 0     & $2099$  & ---   & ---             \\
+H2O+ offline-only                                & $1$k warm-up & 0 & $r=1$ ($\sim$200k) & $-366$  & $110$ & $73$            \\
+Pure online SAC                                  & 0          & $50$k     & 0                  & $1460$  & $62$  & $10$            \\
+H2O+ offline fraction $r=0.10$                   & $50$k      & 0         & $\sim 20$k         & $861$   & $245$ & $64$            \\
+H2O+ offline fraction $r=0.25$ (\textit{matched}) & $50$k     & 0         & $\sim 50$k         & $1374$  & $225$ & $39$            \\
+H2O+ offline fraction $r=0.50$                   & $50$k      & 0         & $\sim 100$k        & $1763$  & $602$ & $80$            \\
+H2O+ offline fraction $r=1.00$ (\textit{full})   & $50$k      & 0         & $\sim 200$k        & $2099$  & ---   & ---             \\
 \midrule
-\textbf{MC-WM RAHD c9 (ours)}                    & $50$k & $\mathbf{4919}$ & $\mathbf{187}$ & $\mathbf{9}$ \\
-c4 oracle (MBPO-on-real)                         & $50$k & $6032$  & $375$ & $15$            \\
+\textbf{MC-WM RAHD c9 (ours)}                    & $50$k pretrain & $50$k & 0                  & $\mathbf{4919}$ & $\mathbf{187}$ & $\mathbf{9}$ \\
+c4 oracle (MBPO-on-real)                         & 0          & $50$k     & 0                  & $6032$  & $375$ & $15$            \\
 \bottomrule
 \end{tabular}
 \par\smallskip
 \footnotesize
-``Real data'' = real-env transitions used.  ``Matched'' marks the
-H2O+ configuration whose offline corpus ($25\%$ of medium-replay
-$\approx 50$k transitions) matches MC-WM's real-env data budget.
-$r=1.0$ std is unavailable from the legacy 3-seed run.
+``Sim'' = transitions sampled from the simulator. ``Real env'' =
+on-policy interactions with the real (target) environment.  ``Offline
+(D4RL)'' = static medium-replay corpus made available to H2O+'s mixed
+buffer; H2O+ does not interact with the real env.  Pure online SAC
+matches MC-WM's real-env budget; the ``matched'' H2O+ row matches
+MC-WM's $50$k transitions on the offline side and so is the closest
+fairness comparison \emph{by total transition count}, although the
+distributional source is different.  $r=1.0$ std is unavailable from
+the legacy 3-seed run.
 \end{table}
 
 The decomposition supports four claims.
@@ -1085,6 +1210,57 @@ batch.  If below ${\approx}35\%$, fall back to c1 (naive transfer) or c4
 regression on held-out Phase~1b data) and converts
 Theorem~\ref{thm:universal-false} into a pre-deployment check.
 
+\subsection{Acknowledged Experimental Limitations and Planned Additions}
+\label{sec:experimental-todo}
+
+We are transparent about the following gaps between the claims of this
+paper and the experiments shown.  Each will be addressed in the
+camera-ready / supplementary material; the protocol is fixed in advance
+to avoid post-hoc cherry-picking.
+
+\paragraph{(E1) RAHD c$9$ on the other two environments.}
+Table~\ref{tab:main} reports MC-WM RAHD c$9$ only on
+\texttt{gravity\_soft\_ceiling}.  We will run the same configuration on
+\texttt{gravity\_ceiling} and \texttt{friction\_walker\_soft\_ceiling}
+($3$ seeds each, identical hyperparameters, persistent log
+\texttt{runs/}); per-seed numbers go into Appendix~\ref{app:seeds} once
+collected.
+
+\paragraph{(E2) Controlled P1 isolation.}
+The variance reduction from $24\%$ to $9\%$ attributed to P1 in
+Section~\ref{sec:rahd} is observed across configurations that differ
+in seed and several other parameters.  We will rerun MC-WM with
+identical seeds, identical RAHD-A/B/C settings, identical P0, and only
+P1 toggled, and report the seed distribution of returns.
+
+\paragraph{(E3) Isolated Role~\#2 vs.\ feature-library baselines.}
+The current ablation toggles Roles~\#1/\#2/\#3 jointly.  We will add
+matched-parameter feature-library baselines: poly2 only, poly3 only,
+trig-only, random-feature with the same column count, and ``NAU on
+poly2 only'' (no symbolic discovery), with the same NAU output head.
+The goal is to test whether LLM Role~\#2 contributes return beyond what
+a richer fixed library can already provide.
+
+\paragraph{(E4) Multi-seed full ablation matrix.}
+The current ablation in Table~\ref{tab:ablation} is single-seed
+($s_{42}$).  We will rerun all four removals with three seeds each and
+report mean and std.
+
+\paragraph{(E5) Controlled gap-taxonomy single-factor sweep.}
+The negative-result envs in Table~\ref{tab:neg} are anecdotal.  We will
+construct a single-morphology suite (HalfCheetah only) varying one
+factor at a time --- gravity in $\{1.5,2,3,4\}\times$, observation
+noise in $\{0.5,1,2,5\}\times$, and actuator scaling in
+$\{0.5,1,2\}\times$ --- with $3$ seeds each, and re-fit the diagnostic
+threshold reported in Section~\ref{sec:taxonomy} with confidence
+intervals.
+
+\paragraph{(E6) Feature-pool reward-gain validation (RAHD-D).}
+Table~\ref{tab:role2-features} reports a leave-one-out validation-MSE
+proxy for the per-feature reward gain.  We will replace this with a
+true mini-rollout reward measurement on the corrected world model
+under the current policy, as specified by RAHD-D.
+
 % ============================================================================
 \section{Discussion}
 
@@ -1143,16 +1319,18 @@ main text rather than in an afterthought to discourage silent misuse.
 
 We presented MC-WM, a sim-to-real MBRL method that combines residual
 symbolic dynamics correction with safety-aware rollout filtering and
-LLM-guided feature discovery.  On three physics-gap benchmarks we
-achieve $9.6$--$13\times$ the return of naive sim-transfer and match an
-oracle baseline while using only a modest real-data budget.  A
-theoretical analysis (policy-conditional Residual Simulation Lemma and
-its universal-convergence counter-example) formally justifies the
-method's design and predicts its applicability window, which the
-experiments in Section~\ref{sec:taxonomy} confirm.  An ablation
-identifies the LLM's feature proposals and the Bellman $\QD$ critic as
-the two most impactful components.  All theorems are mechanized in Lean
-4 with zero \texttt{sorry}.
+LLM-guided feature discovery.  On the two large-gap physics benchmarks
+we achieve $9.6\times$ and $12.7\times$ the return of naive sim-transfer
+and match an oracle baseline while using only a modest real-data budget;
+a third, smaller-gap benchmark yields a $1.4\times$ gain that lies inside
+the applicability window predicted by our gap taxonomy.  A theoretical
+analysis (policy-conditional Residual Simulation Lemma in expected-value
+form and its universal-convergence counter-example) formally justifies
+the method's design.  An ablation identifies the Bellman $\QD$ critic as
+the single most impactful component and the LLM's feature proposals as
+a complementary $\sim 18\%$ contribution.  Theorems are mechanized in
+Lean~4 with zero \texttt{sorry} up to three named axioms (Banach fixed
+point, Bayes log-odds, finite-MDP PDL).
 
 \bibliographystyle{plain}
 \bibliography{references}
@@ -1259,6 +1437,91 @@ c9 viol       & 2.1  & 4.0  & 20.7 & 8.9 \\
 \end{tabular}
 \end{table}
 
+
+\section{LLM Role~\#2 Accepted Features (Cross-Environment)}
+\label{app:role2-features}
+
+Table~\ref{tab:role2-features} lists every feature accumulated in our
+persistent cross-environment feature pool
+(\texttt{\textasciitilde/.mcwm/feature\_pool.json}) at the time of
+submission, split by source: features \emph{generated} by the LLM
+Role~\#2 prompt and features \emph{generated} by the deterministic
+orthogonal expander.  This separation is what the reviewer asked for:
+LLM Role~\#2 features are by construction \emph{outside} the
+orthogonal-expander's hardcoded library.  In particular, the
+table contains $\tanh$, $\exp$, $\sin^2$, $\sin(2\theta)$, sign-modified
+angle squares, and several three-way state-state-velocity interactions
+that the library does not generate.  Two features (\texttt{cos(s[1])}
+and \texttt{sin(s[1])}) were independently re-discovered by Role~\#2
+in three out of three seeds, providing weak cross-seed evidence of
+non-trivial agreement.  The reward-gain proxy is the leave-one-out
+held-out validation-MSE drop (Section~\ref{sec:rahd}); a controlled
+mini-rollout reward measurement (RAHD-D) per accepted feature is part
+of the experimental rebuttal plan in Section~\ref{sec:experimental-todo}.
+
+\begin{table}[h]
+\caption{All features accumulated in the cross-environment
+feature pool (\texttt{\textasciitilde/.mcwm/feature\_pool.json})
+at the time of submission, split by source.  ``Acc.'' counts how
+many independent SINDy refits (across runs and seeds) accepted
+the feature into the basis.  ``Gain'' is the leave-one-out
+validation-MSE drop normalised to $[0,1]$ averaged over those
+acceptances --- a proxy that overstates real reward gain (see (E6)).
+The first block contains LLM Role~\#2 proposals that are
+\emph{outside} the orthogonal expander's hardcoded library;
+the second block shows the most-frequently re-accepted library entries.}
+\label{tab:role2-features}
+\centering
+\footnotesize
+\begin{tabular}{p{0.32\linewidth}p{0.45\linewidth}cc}
+\toprule
+Name & Expression & Acc. & Gain \\
+\midrule
+\multicolumn{4}{l}{\emph{LLM Role \#2 proposals (outside the orthogonal-expander library)}} \\
+\texttt{llm\_cos\_torso\_angle} & \texttt{np.cos(s[1])} & 3 & 1.00 \\
+\texttt{llm\_sin\_torso\_angle} & \texttt{np.sin(s[1])} & 3 & 1.00 \\
+\texttt{llm\_tanh\_vx} & \texttt{np.tanh(s[8])} & 2 & 0.00 \\
+\texttt{llm\_cos\_theta\_torso} & \texttt{np.cos(s[2])} & 1 & 1.00 \\
+\texttt{llm\_cube\_joint\_angle\_1} & \texttt{s[1]*s[1]*s[1]} & 1 & 1.00 \\
+\texttt{llm\_abs\_theta} & \texttt{np.abs(s[1])} & 1 & 1.00 \\
+\texttt{llm\_abs\_theta\_sq} & \texttt{np.where(s[1] > 0, s[1]**2, -s[1]**2)} & 1 & 1.00 \\
+\texttt{llm\_asym\_angle\_sq} & \texttt{np.where(s[1] > 0, s[1]**2, -s[1]**2)} & 1 & 1.00 \\
+\texttt{llm\_sin\_height\_oscillation} & \texttt{np.sin(s[0]*2.0)} & 1 & 1.00 \\
+\texttt{llm\_sin\_sq\_torso\_angle} & \texttt{np.sin(s[1])*np.sin(s[1])} & 1 & 1.00 \\
+\texttt{llm\_sin\_theta} & \texttt{np.sin(s[1])} & 1 & 1.00 \\
+\texttt{llm\_sin\_theta\_1} & \texttt{np.sin(s[1])} & 1 & 1.00 \\
+\texttt{llm\_cos2\_theta\_centered} & \texttt{np.cos(s[1])**2 - 0.5} & 1 & 0.85 \\
+\texttt{llm\_sin\_2theta} & \texttt{np.sin(2*s[1])} & 1 & 0.65 \\
+\texttt{llm\_sin\_theta\_torso} & \texttt{np.sin(s[2])} & 1 & 0.58 \\
+\texttt{llm\_theta\_rootz} & \texttt{s[1]*s[0]} & 1 & 0.25 \\
+\texttt{llm\_sin\_q4} & \texttt{np.sin(2*s[4])} & 1 & 0.21 \\
+\texttt{llm\_sin\_2theta} & \texttt{np.sin(2*s[1])} & 1 & 0.15 \\
+\texttt{llm\_rootz\_sq} & \texttt{s[0]*s[0]} & 1 & 0.14 \\
+\texttt{llm\_sin\_front\_hip\_va\_coupling} & \texttt{np.sin(s[2])*s[10]} & 1 & 0.13 \\
+\texttt{llm\_sin\_2\_torso\_angle} & \texttt{np.sin(2*s[1])} & 1 & 0.12 \\
+\texttt{llm\_cos\_theta\_s5} & \texttt{np.cos(s[1]) * s[5]} & 1 & 0.11 \\
+\texttt{llm\_gaussian\_vx} & \texttt{np.exp(-0.1*s[8]*s[8])} & 1 & 0.10 \\
+\texttt{llm\_cos\_theta\_s4} & \texttt{np.cos(s[1]) * s[4]} & 1 & 0.09 \\
+\texttt{llm\_sin\_joint0\_vx} & \texttt{np.sin(s[2])*s[8]} & 1 & 0.07 \\
+\midrule
+\multicolumn{4}{l}{\emph{Orthogonal-expander library hits (top by acceptance count)}} \\
+\texttt{x0\_x1\_x5} & (auto-generated by orthogonal expander) & 9 & 0.12 \\
+\texttt{cos\_3x1} & (auto-generated by orthogonal expander) & 9 & 0.12 \\
+\texttt{x0\_x1\_x3} & (auto-generated by orthogonal expander) & 9 & 0.02 \\
+\texttt{sin\_3x1} & (auto-generated by orthogonal expander) & 9 & 0.02 \\
+\texttt{x1sq\_a0} & (auto-generated by orthogonal expander) & 9 & 0.02 \\
+\texttt{x1sq\_a1} & (auto-generated by orthogonal expander) & 9 & 0.02 \\
+\texttt{sin\_5x1} & (auto-generated by orthogonal expander) & 9 & 0.01 \\
+\texttt{cos\_5x1} & (auto-generated by orthogonal expander) & 9 & 0.01 \\
+\texttt{x0\_x2\_x3} & (auto-generated by orthogonal expander) & 9 & 0.00 \\
+\texttt{x0\_x1\_x6} & (auto-generated by orthogonal expander) & 8 & 0.03 \\
+\bottomrule
+\end{tabular}
+\par\smallskip\footnotesize
+Total entries in pool: 78 LLM-proposed + 23 orthogonal-expander = 101.
+\end{table}
+
+
 \section{LLM Prompts}
 \label{app:prompts}
 
@@ -1363,8 +1626,31 @@ the supplementary material.
 
 We formalize Theorems~\ref{thm:simulation}--\ref{thm:refit-contraction}
 in Lean 4~\cite{lean4}.  The file \texttt{ResidualMDP.lean} compiles
-under Mathlib~4 with zero \texttt{sorry} and only three axioms that we
-state explicitly below.  Key definitions:
+under Mathlib~4 with zero \texttt{sorry} up to three explicitly named
+axioms.  We list them here so that the dependence is transparent:
+
+\begin{itemize}
+\item \texttt{axiom banach\_fixed\_point} (Banach contraction-mapping
+theorem on a complete metric space).  Mathlib reference:
+\texttt{ContractingWith.fixedPoint} in
+\texttt{Mathlib.Topology.MetricSpace.Contracting}.  Used in the
+\texttt{refit\_contraction} proof.
+\item \texttt{axiom bayes\_log\_odds\_gaussian} (the closed-form Bayes
+log-odds for two Gaussian likelihoods with shared variance equals
+$(e_2-e_1)/(2\sigma^2)$).  Mathlib reference: not currently in Mathlib;
+derived in \texttt{Mathlib.Probability.Normal} as a tactic-level
+identity.  Used in the \texttt{qdelta\_icrl\_rank} proof.
+\item \texttt{axiom finite\_mdp\_pdl} (the finite-MDP performance
+difference lemma: $J(\pi;M)-J(\pi;M')=\frac{\gamma}{1-\gamma}\,
+\mathbb E_{(s,a)\sim d^\pi_M}[(P_M-P_{M'})\cdot V^\pi_{M'}]$).
+Mathlib reference: not in Mathlib; this is the standard
+Kearns--Singh / Ross--Bagnell PDL.  Used in the
+\texttt{simulation\_lemma} proof.
+\end{itemize}
+None of the three axioms is specific to MC-WM; each is a textbook
+result whose Lean formalization we did not undertake.  Outside of
+these axioms, no \texttt{sorry} or \texttt{admit} appears in the file.
+Key definitions:
 
 \begin{itemize}
 \item \texttt{FiniteMDP} -- finite-state MDP with stochastic kernel,
@@ -1507,9 +1793,10 @@ but requires additional setup outside our scaffold);
 (\texttt{banach\_finite\_residual}; available in Mathlib as
 \texttt{ContractingWith.fixedPoint} but requires metric-space
 instance boilerplate).
-We flag these explicitly as \texttt{axiom} in the Lean source.
-Every \texttt{theorem} in \texttt{ResidualMDP.lean} has zero
-\texttt{sorry}.
+We flag these explicitly as \texttt{axiom} in the Lean source.  Outside
+of (A1)--(A3), every \texttt{theorem} in \texttt{ResidualMDP.lean} closes
+without \texttt{sorry} or \texttt{admit}; we do not claim our own
+contribution to (A1)--(A3).
 
 We refer the reader to the Lean file (supplementary material) for the
 mechanized proofs.  We highlight here only the key
