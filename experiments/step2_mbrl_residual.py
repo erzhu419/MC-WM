@@ -64,23 +64,44 @@ N_CRITICS = 3; BETA_LCB = -2.0; HIDDEN = 256; LR = 3e-4
 
 
 class ReplayBuffer:
+    """Replay buffer with optional per-sample weight (Bug 2 fix).
+
+    The weight is meant to be a *trust* signal — e.g.\\ exp(QΔ(s,a)) — and
+    is consumed by the agent's critic loss as a multiplier on TD-error²,
+    NOT as a reward scaling.  Storing a physical reward keeps the env's
+    reward semantics unchanged and prevents the anti-conservative
+    'small-w shrinks negative reward' bug.
+    """
+
     def __init__(self, od, ad, cap):
         self.max_size = cap; self.ptr = self.size = 0
         self.s = np.zeros((cap, od), np.float32); self.a = np.zeros((cap, ad), np.float32)
         self.r = np.zeros((cap, 1), np.float32); self.s2 = np.zeros((cap, od), np.float32)
         self.d = np.zeros((cap, 1), np.float32)
-    def add(self, s, a, r, s2, d):
+        self.w = np.ones((cap, 1), np.float32)  # per-sample weight (default 1.0)
+
+    def add(self, s, a, r, s2, d, w: float = 1.0):
         i = self.ptr; self.s[i]=s; self.a[i]=a; self.r[i]=r; self.s2[i]=s2; self.d[i]=d
+        self.w[i] = w
         self.ptr = (i+1) % self.max_size; self.size = min(self.size+1, self.max_size)
-    def add_batch(self, s, a, r, s2, d):
+
+    def add_batch(self, s, a, r, s2, d, w=None):
+        if w is None:
+            w = np.ones(len(s), dtype=np.float32)
         for i in range(len(s)):
-            self.add(s[i], a[i], r[i], s2[i], d[i])
+            self.add(s[i], a[i], r[i], s2[i], d[i], float(w[i]))
+
     def reset(self):
         """Clear buffer without reallocating arrays (avoids malloc/free overhead)."""
         self.ptr = self.size = 0
+
     def sample(self, n):
+        """Returns (s, a, r, s2, d, w).  Backward-compat callers that unpack
+        only 5 values must be updated; we keep the 6-tuple form mandatory."""
         idx = np.random.randint(0, self.size, n)
-        return tuple(torch.FloatTensor(x[idx]).to(DEVICE) for x in [self.s, self.a, self.r, self.s2, self.d])
+        return tuple(torch.FloatTensor(x[idx]).to(DEVICE)
+                     for x in [self.s, self.a, self.r, self.s2, self.d, self.w])
+
     def sample_states(self, n):
         idx = np.random.randint(0, self.size, n)
         return self.s[idx]
@@ -877,6 +898,10 @@ def main():
             _flib = args.feature_library
             if _flib == "random":
                 _flib = f"random_{args.random_feature_count}"
+            # Hypothesis log id: env-seed-timestamp so the file name encodes
+            # the run identity (instead of falling back to "unknown_env").
+            import time as _time
+            _hyp_run_id = f"{args.env}_s{args.seed}_{int(_time.time())}"
             residual = SINDyNAUAdapter(obs_dim, act_dim, device=DEVICE, log_fn=log,
                                         env_type=_env_type, max_rounds=_max_rounds,
                                         claude_oracle=_claude,  # Role #2 hypotheses
@@ -885,10 +910,12 @@ def main():
                                         max_delta_beta_inf=args.rahd_max_delta_beta,
                                         policy_density=_policy_density,
                                         feature_library=_flib,
-                                        random_feature_count=args.random_feature_count)
+                                        random_feature_count=args.random_feature_count,
+                                        hypothesis_log_run_id=_hyp_run_id)
             # Wire the pool-side env tag (stays distinct from ``_env_type``).
-            if _feature_pool is not None:
-                residual._pool_env_tag = _pool_env_tag
+            # Always set, regardless of pool presence, so HypothesisLog
+            # records carry the correct env name even when RAHD-A is off.
+            residual._pool_env_tag = _pool_env_tag
         residual.fit(s_real, a_real, ns_sim_pred, r_sim_pred, s2_real, r_real,
                      n_epochs=100, patience=20,
                      real_dones=None if NO_DONE_HEAD else d_real)
@@ -1208,14 +1235,33 @@ def main():
                         start_states, actions, deterministic=False)
 
                     if mode in ("c9", "c10"):
-                        ns_real = env_buf.s2[s_idx]
-                        per_s_err = np.mean((ns_pred - ns_real) ** 2, axis=1)
                         if qdelta_bellman is not None:
-                            # Bellman QΔ critic: w = exp(QΔ(s,a)), γ>0 propagation
+                            # Bellman QΔ critic: w = exp(QΔ(s,a)), γ>0 propagation.
+                            # No action-mismatch issue here — the trained critic
+                            # was fit on real (s,a,s') transitions and evaluated
+                            # at the rollout's *new* (s,a).
                             w_qdelta = qdelta_bellman.weight_np(start_states, actions)
                         else:
-                            # Legacy per-step weight (γ=0): 1/(1+MSE/τ)
+                            # Legacy per-step weight (γ=0): 1/(1+MSE/τ).
+                            # FIX: per-step error must be computed on the real
+                            # transition that matches the action being scored;
+                            # using env_buf.s2[s_idx] (next-state of the OLD
+                            # action) against ns_pred (predicted from the NEW
+                            # action) was action-mismatched and contaminated
+                            # the trust signal with policy-shift noise.  We now
+                            # evaluate the corrected model's prediction on the
+                            # buffer's stored (s_t, a_t) → s_{t+1}_real triplet
+                            # so per_s_err is purely model error.
+                            buf_a = env_buf.a[s_idx]
+                            ns_pred_buf, _, _ = corrected.predict_full_tuple(
+                                start_states, buf_a, deterministic=True)
+                            ns_real = env_buf.s2[s_idx]
+                            per_s_err = np.mean((ns_pred_buf - ns_real) ** 2, axis=1)
                             tau_s = float(np.median(per_s_err)) + 1e-8
+                            # Apply the per-step weight at the new (s,a) by
+                            # using the same τ; trust at (s,a) is approximated
+                            # by trust at (s, buf_a) under the policy-locality
+                            # assumption justified for short refit intervals.
                             w_qdelta = 1.0 / (1.0 + per_s_err / tau_s)
 
                         # Adaptive β_qdelta: blend QΔ filter toward uniform.
@@ -1246,12 +1292,19 @@ def main():
                                 w_icrl = 0.5 + 0.5 * phi_scores
                                 w = w * w_icrl
                         if constraint_sys is not None:
+                            # Bug 2 fix: pass physical reward, not r_pred*w_qdelta;
+                            # the constraint check should see the env's reward
+                            # signal, not a trust-attenuated proxy.
                             ok_mask, _ = constraint_sys.check_batch(
-                                start_states, actions, ns_pred, r_pred * w_qdelta)
+                                start_states, actions, ns_pred, r_pred)
                             w = w * ok_mask.astype(np.float32)
 
-                        r_weighted = r_pred * w
-                        # Filter zero-weight transitions
+                        # Bug 2 fix: store the trust weight in the buffer's
+                        # ``w`` slot, NOT as a reward multiplier.  Reward
+                        # stays physical so negative penalties are not
+                        # diluted by small w (which the previous formulation
+                        # made bad transitions look 'less bad').  The weight
+                        # multiplies TD-error² in the agent's critic loss.
                         valid = np.where(w > 0.01)[0]
                         if len(valid) > 0:
                             # Full-tuple: only use predicted dones when env has
@@ -1265,8 +1318,8 @@ def main():
                                 d_valid = np.zeros((len(valid), 1), np.float32)
                             model_buf.add_batch(
                                 start_states[valid], actions[valid],
-                                r_weighted[valid].reshape(-1, 1), ns_pred[valid],
-                                d_valid)
+                                r_pred[valid].reshape(-1, 1), ns_pred[valid],
+                                d_valid, w=w[valid].astype(np.float32))
                     else:
                         _done_rate = float(env_buf.d[:env_buf.size].mean()) if env_buf.size > 0 else 0.0
                         if _done_rate > 0.02 and hasattr(residual, 'predict_done'):

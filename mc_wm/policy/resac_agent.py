@@ -258,7 +258,16 @@ class RESACAgent:
 
     def update(self, buf):
         self._update_count += 1
-        s, a, r, s2, d = buf.sample(256)
+        # Sample (s, a, r, s2, d) and optional per-sample weight ``w_buf``.
+        # New buffers (Bug 2 fix) return a 6-tuple where ``w_buf`` is the
+        # trust weight stored at insertion time; legacy buffers return a
+        # 5-tuple, in which case we default ``w_buf=1.0`` (no weighting).
+        sample = buf.sample(256)
+        if len(sample) == 6:
+            s, a, r, s2, d, w_buf = sample
+        else:
+            s, a, r, s2, d = sample
+            w_buf = torch.ones_like(r)
 
         # ── Reward EMA normalization (BAPR v10 piece): scale-only, no shift.
         # Divides reward by running std so Q magnitude stays well-behaved
@@ -316,13 +325,24 @@ class RESACAgent:
         q_tgt_exp = q_tgt.unsqueeze(0).expand_as(q_pred)
         ood_loss = q_pred.std(0).mean()
 
+        # Combine the in-update gap weight with the per-sample weight stored
+        # at buffer-insertion time (Bug 2 fix: model-rollout transitions carry
+        # exp(QΔ(s,a)) as ``w_buf``; env transitions carry 1.0).  Both
+        # multiply the TD-error², leaving the reward signal physical.
+        w_buf_flat = w_buf.squeeze(-1)  # (B,)
         if iw_weights is not None:
-            # Weighted MSE: high-gap transitions get lower learning weight
-            iw_exp = iw_weights.unsqueeze(0).expand_as(q_pred)  # (N, B)
-            td_err = (q_pred - q_tgt_exp.detach()) ** 2         # (N, B)
-            critic_loss = (iw_exp * td_err).mean() + self.beta_ood * ood_loss
+            sample_w = iw_weights * w_buf_flat
         else:
+            sample_w = w_buf_flat
+
+        # If sample_w is the constant-one tensor, fall back to plain MSE for
+        # backward-compatibility (numerically identical, slightly cheaper).
+        if torch.allclose(sample_w, torch.ones_like(sample_w)):
             critic_loss = F.mse_loss(q_pred, q_tgt_exp.detach()) + self.beta_ood * ood_loss
+        else:
+            sw_exp = sample_w.unsqueeze(0).expand_as(q_pred)  # (N, B)
+            td_err = (q_pred - q_tgt_exp.detach()) ** 2       # (N, B)
+            critic_loss = (sw_exp * td_err).mean() + self.beta_ood * ood_loss
 
         self.opt_critic.zero_grad(); critic_loss.backward(); self.opt_critic.step()
 

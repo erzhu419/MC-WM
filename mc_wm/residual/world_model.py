@@ -100,7 +100,7 @@ class WorldModelEnsemble:
 
         best_val_loss = [float('inf')] * self.K
         best_epoch = [0] * self.K
-        best_state = [m.state_dict().copy() for m in self.models]
+        best_state = [{k: v.detach().cpu().clone() for k, v in m.state_dict().items()} for m in self.models]
 
         for epoch in range(n_epochs):
             # Train
@@ -130,7 +130,7 @@ class WorldModelEnsemble:
                     if val_loss < best_val_loss[k]:
                         best_val_loss[k] = val_loss
                         best_epoch[k] = epoch
-                        best_state[k] = model.state_dict().copy()
+                        best_state[k] = {kk: vv.detach().cpu().clone() for kk, vv in model.state_dict().items()}
 
             if (epoch + 1) % 20 == 0:
                 avg_val = np.mean(best_val_loss)
@@ -268,7 +268,7 @@ class ResidualAdapter:
         tgt_t = torch.FloatTensor(targets).to(self.device)
 
         best_val = float('inf'); best_epoch = 0
-        best_state = self.net.state_dict().copy()
+        best_state = {k: v.detach().cpu().clone() for k, v in self.net.state_dict().items()}
 
         for epoch in range(n_epochs):
             self.net.train()
@@ -286,7 +286,7 @@ class ResidualAdapter:
                 val_loss = float(nn.MSELoss()(self.net(sa_v), tgt_t[val_idx]))
                 if val_loss < best_val:
                     best_val = val_loss; best_epoch = epoch
-                    best_state = self.net.state_dict().copy()
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.net.state_dict().items()}
 
             if (epoch + 1) % 20 == 0:
                 print(f"    residual epoch {epoch+1} | val={val_loss:.5f} best={best_val:.5f}")

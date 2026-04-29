@@ -30,6 +30,9 @@ from mc_wm.self_audit.diagnosis import DiagnosisBattery
 from mc_wm.self_audit.auto_expand import AutoExpander
 from mc_wm.self_audit.llm_oracle import LLMOracle
 from mc_wm.self_audit.orthogonal_expand import OrthogonalExpander
+from mc_wm.self_audit.hypothesis import (
+    Hypothesis, HypothesisLog, leave_one_feature_out_mse,
+)
 
 
 class SINDyNAUAdapter:
@@ -77,7 +80,11 @@ class SINDyNAUAdapter:
                  # "random_K"     — random Fourier features, count=K
                  feature_library: str = "poly2",
                  random_feature_count: int = 100,
-                 disable_orthogonal_expansion: bool = False):
+                 disable_orthogonal_expansion: bool = False,
+                 # ── HypothesisLog: evidence chain for every accepted/rejected
+                 # feature/constraint/HP.  Default = on; pass run_id="" to
+                 # disable persistence.
+                 hypothesis_log_run_id: str | None = None):
         self._log = log_fn or (lambda msg: print(msg))
         self._env_type = env_type  # if set, use LLM oracle instead of auto-expand
         # RAHD module hooks (any can be None → legacy behavior).
@@ -94,6 +101,14 @@ class SINDyNAUAdapter:
         # Track feature provenance so the pool can be updated correctly
         # at end-of-fit: name → "pool" | "orth" | "llm".
         self._feat_provenance: dict[str, str] = {}
+        # Hypothesis-evidence log (one JSONL per run).  When ``hypothesis_log_run_id``
+        # is None we synthesise one; pass "" to disable.
+        if hypothesis_log_run_id == "":
+            self._hyp_log = None
+        else:
+            import time, os
+            rid = hypothesis_log_run_id or f"{self._pool_env_tag}-{os.getpid()}-{int(time.time())}"
+            self._hyp_log = HypothesisLog(rid)
         # Role #2: Claude oracle for feature hypotheses in the self-hypothesis loop.
         # When set, augments orthogonal expansion with LLM-suggested physics features.
         self._claude_oracle = claude_oracle
@@ -253,35 +268,53 @@ class SINDyNAUAdapter:
                 entry["outcome"] = name_to_stat[entry["name"]]
 
     def prune_llm_features(self, feature_names: list, coefs: np.ndarray,
-                           threshold: float = 0.02) -> list:
+                           threshold: float = 0.02,
+                           theta_val: np.ndarray = None,
+                           target_val: np.ndarray = None) -> list:
         """
-        Role #4: review LLM-added feature contributions via SINDy coefs and
-        recommend names to drop.
+        Role #4: review LLM-added feature contributions and recommend names
+        to drop.  Now reports a real ``val_mse_delta`` (positive ⇒ feature
+        is helping) computed via leave-one-feature-out on a validation slice
+        when ``theta_val`` / ``target_val`` are supplied; falls back to a
+        coefficient-magnitude heuristic only when they are not.
 
-        feature_names: full feature name list (same order as coefs columns)
-        coefs: (n_dims, n_features) SINDy coefficient matrix after fit
-        threshold: |coef| below this counts as "inactive" for that dim
+        Args:
+            feature_names: full feature name list (same order as coefs cols).
+            coefs: (n_dims, n_features) SINDy coefficient matrix after fit.
+            threshold: |coef| below this counts as "inactive" for that dim.
+            theta_val: optional (N_val, F) validation feature matrix.
+            target_val: optional (N_val, D) validation target.
 
-        Returns: list of LLM feature names to drop (pass to caller to rebuild
-        the feature matrix without them).
+        Returns:
+            list of LLM feature names to drop (caller rebuilds without them).
         """
+        from mc_wm.self_audit.hypothesis import leave_one_feature_out_mse
+
         if self._claude_oracle is None:
             return []
         llm_indices = [i for i, n in enumerate(feature_names)
                        if isinstance(n, str) and n.startswith("llm_")]
         if not llm_indices:
             return []
+
         stats = []
         for i in llm_indices:
             col = coefs[:, i] if coefs.ndim == 2 else np.array([coefs[i]])
             max_abs = float(np.abs(col).max())
             n_active = int((np.abs(col) > threshold).sum())
+
+            # Real per-feature val MSE drop (positive ⇒ feature helps).
+            if theta_val is not None and target_val is not None and coefs.ndim == 2:
+                mse_drop = leave_one_feature_out_mse(theta_val, coefs, target_val, i)
+            else:
+                mse_drop = 0.0  # not measurable here; caller may override later
+
             stats.append({
                 "name": feature_names[i],
                 "expr": feature_names[i][4:],  # strip "llm_" prefix for display
                 "max_abs_coef": round(max_abs, 5),
                 "n_dims_active": n_active,
-                "val_mse_delta": 0.0,  # placeholder; not measured per-feature
+                "val_mse_delta": round(mse_drop, 6),
             })
         to_drop = self._claude_oracle.role4_prune_features(
             self._env_desc_llm, stats)
@@ -424,6 +457,7 @@ class SINDyNAUAdapter:
                 beta_drop = beta[:, mask]
                 pred_drop = theta_drop @ beta_drop.T
                 mse_without = float(_np.mean((pred_drop - tgt_val) ** 2))
+                val_mse_delta = mse_with - mse_without  # negative ⇒ feature helps
                 gain = max(0.0, min(1.0, (mse_without - mse_with) /
                                           max(mse_with, 1e-6)))
                 env = self._pool_env_tag
@@ -433,6 +467,33 @@ class SINDyNAUAdapter:
                     name=name, expr=expr_for_pool, env=env,
                     reward_gain=gain, was_accepted=True,
                 )
+                # Persist a Hypothesis record so the evidence chain survives
+                # the run.  ``val_mse_delta`` is the auditable metric.
+                if self._hyp_log is not None:
+                    src = self._feat_provenance.get(name, "unknown")
+                    h = Hypothesis(
+                        claim=f"feature {name} reduces residual val MSE on {env}",
+                        source={"orth": "orth_expander", "llm": "llm_role2",
+                                "pool": "feature_pool"}.get(src, src),
+                        kind="feature",
+                        expr=expr_for_pool,
+                        env=env,
+                        round=getattr(self, "_current_round", 0),
+                        expected_metric="val_mse_delta",
+                        expected_direction="decrease",
+                        expected_min_delta=0.0,
+                    )
+                    h.record_outcome(
+                        evidence={
+                            "val_mse_with": mse_with,
+                            "val_mse_without": mse_without,
+                            "val_mse_delta": val_mse_delta,
+                            "reward_gain_proxy": gain,
+                        },
+                        decision="accepted" if val_mse_delta < 0 else "deferred",
+                        failure_reason=("redundant" if val_mse_delta >= 0 else None),
+                    )
+                    self._hyp_log.append(h)
             # Save once after the round to avoid IO churn.
             self._feature_pool.save()
             self._log(f"  RAHD-A: feature pool updated with {n_extra} entries")
@@ -542,7 +603,7 @@ class SINDyNAUAdapter:
         dr_t = torch.FloatTensor(delta_correction_r).to(self.device)
         perm_r = np.random.permutation(N)
         n_val_r = max(int(N * 0.1), 50)
-        best_r_val = float('inf'); best_r_state = self._reward_net.state_dict().copy()
+        best_r_val = float('inf'); best_r_state = {k: v.detach().cpu().clone() for k, v in self._reward_net.state_dict().items()}
         for ep in range(100):
             self._reward_net.train()
             for i in range(0, N - n_val_r, 256):
@@ -554,7 +615,7 @@ class SINDyNAUAdapter:
             self._reward_net.eval()
             with torch.no_grad():
                 vl = float(nn.MSELoss()(self._reward_net(SA_t[perm_r[:n_val_r]]), dr_t[perm_r[:n_val_r]]))
-                if vl < best_r_val: best_r_val = vl; best_r_ep = ep; best_r_state = self._reward_net.state_dict().copy()
+                if vl < best_r_val: best_r_val = vl; best_r_ep = ep; best_r_state = {k: v.detach().cpu().clone() for k, v in self._reward_net.state_dict().items()}
             if ep - best_r_ep >= 20: break
         self._reward_net.load_state_dict(best_r_state)
         self._log(f"  Reward MLP: val MSE={best_r_val:.5f} (separate from state SINDy)")
@@ -570,7 +631,7 @@ class SINDyNAUAdapter:
             perm_d = np.random.permutation(N)
             n_val_d = max(int(N * 0.1), 50)
             best_d_val = float('inf')
-            best_d_state = self._done_net.state_dict().copy()
+            best_d_state = {k: v.detach().cpu().clone() for k, v in self._done_net.state_dict().items()}
             best_d_ep = 0
             for ep in range(80):
                 self._done_net.train()
@@ -590,7 +651,7 @@ class SINDyNAUAdapter:
                     if vl < best_d_val:
                         best_d_val = vl
                         best_d_ep = ep
-                        best_d_state = self._done_net.state_dict().copy()
+                        best_d_state = {k: v.detach().cpu().clone() for k, v in self._done_net.state_dict().items()}
                 if ep - best_d_ep >= 15:
                     break
             self._done_net.load_state_dict(best_d_state)
@@ -638,7 +699,7 @@ class SINDyNAUAdapter:
 
             # Warm-start NAU on SGD-updated predictions (smooth target)
             best_val = float('inf'); best_epoch = 0
-            best_state = self._nau_head.state_dict().copy()
+            best_state = {k: v.detach().cpu().clone() for k, v in self._nau_head.state_dict().items()}
             for epoch in range(min(n_epochs, 30)):
                 self._nau_head.train()
                 perm_t = np.random.permutation(train_idx)
@@ -650,7 +711,7 @@ class SINDyNAUAdapter:
                 self._nau_head.eval()
                 with torch.no_grad():
                     vl = float(nn.MSELoss()(self._nau_head(Theta_t[val_idx]), tgt_t[val_idx]))
-                    if vl < best_val: best_val = vl; best_epoch = epoch; best_state = self._nau_head.state_dict().copy()
+                    if vl < best_val: best_val = vl; best_epoch = epoch; best_state = {k: v.detach().cpu().clone() for k, v in self._nau_head.state_dict().items()}
                 if epoch - best_epoch >= 10: break
             self._nau_head.load_state_dict(best_state)
             self._trained = True
@@ -850,6 +911,9 @@ class SINDyNAUAdapter:
                         new_extra = (np.hstack([new_extra, llm_cols])
                                      if new_extra.shape[1] > 0 else llm_cols)
                         new_names = new_names + llm_names
+                        # Tag provenance so HypothesisLog records the right source.
+                        for n in llm_names:
+                            self._feat_provenance[n] = "llm"
 
             if len(new_names) > 0:
                 if extra_cols is not None:
@@ -963,7 +1027,7 @@ class SINDyNAUAdapter:
         val_idx, train_idx = perm[:n_val], perm[n_val:]
 
         best_val = float('inf'); best_epoch = 0
-        best_state = self._nau_head.state_dict().copy()
+        best_state = {k: v.detach().cpu().clone() for k, v in self._nau_head.state_dict().items()}
 
         for epoch in range(n_epochs):
             self._nau_head.train()
@@ -982,7 +1046,7 @@ class SINDyNAUAdapter:
                 val_loss = float(nn.MSELoss()(val_pred, tgt_t[val_idx]))
                 if val_loss < best_val:
                     best_val = val_loss; best_epoch = epoch
-                    best_state = self._nau_head.state_dict().copy()
+                    best_state = {k: v.detach().cpu().clone() for k, v in self._nau_head.state_dict().items()}
 
             if (epoch + 1) % 20 == 0:
                 self._log(f"    NAU epoch {epoch+1} | val={val_loss:.5f} best={best_val:.5f} "
