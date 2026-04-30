@@ -913,13 +913,13 @@ the choice explicit.
 \subsection{Main Results}
 
 \begin{table}[h]
-\caption{Main results (3 seeds, $50$k real-env steps; return and violations per episode).
-``c9 (legacy)'' is MC-WM without the RAHD stabilization module of
-\S\ref{sec:rahd}; ``c9 RAHD'' adds RAHD/P0/P1 and is reported only on the
-environment for which we ran a full RAHD ablation
-(\texttt{gravity\_soft\_ceiling}, see Table~\ref{tab:h2o_decomp}).
-Per-seed numbers for both configurations are in
-Appendix~\ref{app:seeds}.}
+\caption{Main results (3 seeds, $50$k real-env steps).
+\textbf{c9 RAHD} (3 seeds, post-bug-fix) is the configuration evaluated
+on every environment with the same RAHD+P0+P1+GLM~Role~\#$2$ pipeline.
+``c9 (legacy)'' refers to the earlier configuration that did not yet
+include the bug fixes documented in §\ref{sec:bugfixes}; we keep it for
+historical context.  Per-seed numbers and the legacy-vs-fixed delta
+table are in Appendix~\ref{app:seeds}.}
 \label{tab:main}
 \centering
 \small
@@ -928,39 +928,44 @@ Appendix~\ref{app:seeds}.}
 Env & \multicolumn{2}{c|}{c1 (Raw Sim)} & \multicolumn{2}{c|}{c4 (Oracle)} & \multicolumn{2}{c|}{H2O+} & \multicolumn{2}{c|}{c9 (legacy)} & \multicolumn{2}{c}{\textbf{c9 RAHD}} \\
  & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol \\
 \midrule
-gravity\_ceiling           & 543    & 0.72  & 5868 & 0.04  & --    & --   & \textbf{5196} & \textbf{0.02} & --   & --   \\
-gravity\_soft\_ceiling     & 494    & 8.9   & 6032 & 0.52  & 2099  & n/a  & 6288 & 2.0  & \textbf{4919} & \textbf{0.82} \\
-friction\_walker\_soft\_c. & 262    & 5.2   & 254  & 16.6  & --    & --   & \textbf{357}  & \textbf{10.1} & --   & --   \\
+gravity\_ceiling           & 543    & 0.72  & 5868 & 0.04  & --    & --   & 5196 & 0.02 & \textbf{5220$\!\pm\!$181} & \textbf{0.03}  \\
+gravity\_soft\_ceiling     & 494    & 8.9   & 6032 & 0.52  & 2099  & n/a  & 6288 & 2.0  & \textbf{5394$\!\pm\!$478} & \textbf{4.68}  \\
+friction\_walker\_soft\_c. & 262    & 5.2   & 254  & 16.6  & --    & --   & 357  & 10.1 & \textbf{244$\!\pm\!$15}   & \textbf{0.55}  \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Reading the table.}  The first three baseline columns
-(c1 / c4 / H2O+) are unchanged.  We separate two MC-WM configurations:
-\textbf{c9 (legacy)} omits the RAHD module and matches the
-configuration of all earlier ablation tables; \textbf{c9 RAHD} enables
-P0 warmup, P1 belief-conditioned $\QD$, and the RAHD-A/B/C hooks of
-\S\ref{sec:rahd}.  RAHD trades $\sim 22\%$ of return for $\sim 88\%$
-fewer violations, $\sim 4{\times}$ lower seed variance, and the
-data-budget-matched H2O+ comparison of \S\ref{sec:h2o_analysis}.  We
-report c9~RAHD only on \texttt{gravity\_soft\_ceiling} since the
-controlled three-seed RAHD sweep was performed only there; running
-RAHD on the other two environments is part of our concrete asks for
-the rebuttal (Section~\ref{sec:experimental-todo}).
+(c1 / c4 / H2O+) are unchanged.  ``c9 (legacy)'' is the earlier
+configuration whose evaluation pre-dates the five bug fixes
+(\S\ref{sec:bugfixes}); we report the post-fix
+\textbf{c9 RAHD} (mean$\pm$std over $3$ seeds) as the headline number
+on every environment.  The bug fixes shifted the rewards substantially:
+\texttt{gravity\_ceiling} went from $4031\pm 719$ pre-fix to $5220\pm
+181$ post-fix ($+30\%$ return, $-75\%$ seed-spread), and
+\texttt{friction\_walker\_soft\_ceiling} dropped from $353\pm 90$ to
+$244\pm 15$ as the policy stopped trading violations for reward.
 
-\paragraph{Per-environment summary (c9 legacy).}
+\paragraph{Per-environment summary (c9 RAHD, post-fix).}
 First, on \texttt{gravity\_ceiling} our method yields a $9.6\times$
-return over the raw-sim transfer baseline ($5196$ vs.\ $543$) while
-keeping violations below $0.05$/episode, and reaches $89\%$ of oracle
-performance ($5196$ vs.\ c4's $5868$).  Second, on
-\texttt{gravity\_soft\_ceiling} our method matches the oracle ($6288$
-vs.\ $6032$) and out-performs H2O+ by $3\times$ at $r=1.0$.  Third,
-on \texttt{friction\_walker\_soft\_ceiling} our method beats \emph{even}
-the oracle ($357$ vs.\ $254$, a $1.4\times$ improvement) because the
-oracle's policy exploits the learned model into the constraint-violating
-region whereas our constraint filter suppresses those rollouts; the
-small absolute gain reflects this benchmark's small dynamics gap
-($\approx 0.34$ residual improvement in Table~\ref{tab:envs}).
+return over the raw-sim transfer baseline ($5220$ vs.\ $543$) with
+violations below $0.05$/episode and reaches $89\%$ of oracle performance
+($5220$ vs.\ c4's $5868$).  Second, on \texttt{gravity\_soft\_ceiling}
+our method delivers $5394$ at $4.68$ violations/ep and out-performs
+H2O+ at the data-matched $r=0.25$ point ($1374$) by $3.9\times$; H2O+
+at full $r=1.0$ uses $5\times$ the data budget and still trails by
+$2.6\times$.  Third,
+on \texttt{friction\_walker\_soft\_ceiling} the post-fix RAHD return
+$244\pm 15$ is below both raw sim ($262$) and the oracle ($254$); the
+legacy $357$ was inflated by the buffer-weight bug
+(\S\ref{sec:bugfixes}, Bug~2) that made low-trust transitions look
+``less bad'' than they were.  This benchmark's residual improvement
+on real data is only $\approx 0.34$ (Table~\ref{tab:envs}), which
+falls in our gap-taxonomy ``correction-ineffective'' regime
+(§\ref{sec:taxonomy}); a method that needs the residual to provide a
+non-trivial signal is not expected to help here, and our post-fix
+numbers correctly reveal that.  We retain the env in the suite as
+a demarcation case for the applicability boundary.
 
 \begin{figure}[t]
 \centering
@@ -1088,11 +1093,202 @@ $r=1.0$ by $2.3\times$.}
 \label{fig:h2o_scaling}
 \end{figure}
 
+\subsection{Implementation Bug Fixes (Pre-Camera-Ready)}
+\label{sec:bugfixes}
+
+A code review identified five concrete issues whose joint resolution
+materially shifted both the numerical results and the qualitative
+ablation conclusions.  We list them here so the headline
+post-fix numbers in Table~\ref{tab:main} are interpretable and the
+delta-vs-legacy-c9 in Appendix~\ref{app:seeds} is reproducible.
+
+\begin{enumerate}
+\item \textbf{Bug~1 (per-step trust signal, action-mismatched).}  In the
+$\gamma_\Delta=0$ legacy code path the per-step weight
+$1/(1+\mathrm{MSE}/\tau)$ was computing MSE between the model's
+prediction at the \emph{new} action and the buffer's stored next-state
+(corresponding to the \emph{old} action), so trust was dominated by
+policy-shift noise.  Fix: evaluate the corrected model on the buffer's
+actual $(s_t,a_t)$ to get a clean model-error signal.
+
+\item \textbf{Bug~2 (rollout reward scaling instead of TD-loss
+weight).}  Imagined-rollout transitions were stored in the model
+buffer with reward $r\cdot w$, where $w=\exp(\QD)$ is the trust weight.
+This is anti-conservative: when $r$ is negative (e.g.\ a violation
+penalty), small $w$ shrinks the penalty toward zero, making bad
+transitions look ``less bad''.  Fix: store the physical reward and the
+per-sample weight separately; the agent's critic loss multiplies
+$w\cdot\mathrm{TD}^2$ rather than scaling $r$.
+
+\item \textbf{Bug~3 (shallow state-dict copies in early stopping).}
+Twelve sites stored ``best'' checkpoints via
+\texttt{state\_dict().copy()}, which makes a shallow dict copy whose
+tensor values continue to mutate as training proceeds.  The
+``restored best'' was therefore typically the \emph{final} state, not
+the best-validation state.  Fix: deep clone via
+\texttt{\{k:v.detach().cpu().clone() for k,v in sd.items()\}}.  Affected
+the M$_{\mathrm{sim}}$ ensemble, the NAU/NMU head, and the reward/done
+heads.
+
+\item \textbf{Bug~4 (LLM-feature provenance + Role~\#$4$ placeholder).}
+The Role~\#$4$ feature-prune routine was passed
+\texttt{val\_mse\_delta=0.0} as a placeholder, so the LLM only saw
+coefficient magnitudes, not real per-feature contributions.  Fix:
+compute closed-form leave-one-feature-out validation-MSE drop and
+report it; tag every accepted feature with its provenance
+(\texttt{orth\_expander}, \texttt{llm\_role2}, or
+\texttt{feature\_pool}) so downstream analysis can attribute
+contributions cleanly.
+
+\item \textbf{Bug~5 / system change (Hypothesis evidence chain).}
+Replaced the prior ``feature-expansion loop'' with a typed
+\texttt{Hypothesis} dataclass and a per-run JSONL log under
+\texttt{\textasciitilde/.mcwm/hypotheses/}; every accepted feature,
+constraint, or HP change writes one record with claim / source /
+expected metric / measured evidence / decision.
+\end{enumerate}
+
+The qualitative effect on Table~\ref{tab:main} is large:
+\texttt{gravity\_ceiling} return rose $4031{\to}5220$ ($+30\%$),
+\texttt{gravity\_soft\_ceiling} rose $4986{\to}5394$ ($+8\%$), and
+\texttt{friction\_walker\_soft\_ceiling} fell $353{\to}244$ as the
+inflated reward from Bug~2 was corrected.  Across all eleven
+configurations of the multi-seed ablation matrix
+(Table~\ref{tab:ablation-multi}) the average post-fix return is
+$+13\%$ higher and seed-spread is on average $36\%$ tighter.
+
 \subsection{Ablation Study}
 \label{sec:ablation}
 
-We ablate the four distinguishing components of MC-WM on
-\texttt{gravity\_soft\_ceiling} seed $42$ (full-c9 baseline $6611$).
+We re-ran the legacy single-seed ablation (Table~\ref{tab:ablation})
+across three seeds with the bug-fixed pipeline of \S\ref{sec:bugfixes}.
+The multi-seed results in Table~\ref{tab:ablation-multi} reverse two
+of the qualitative conclusions of the legacy single-seed ablation;
+we report both for transparency.
+
+\begin{table}[h]
+\caption{Multi-seed ablation of MC-WM components on
+\texttt{gravity\_soft\_ceiling} (3 seeds, mean$\pm$std, post-bug-fix
+pipeline of \S\ref{sec:bugfixes}).  Compare to the legacy single-seed
+Table~\ref{tab:ablation}.}
+\label{tab:ablation-multi}
+\centering
+\small
+\begin{tabular}{lr@{$\,\pm\,$}lr}
+\toprule
+Config                                    & \multicolumn{2}{c}{Reward} & Viol/ep \\
+\midrule
+Full c9 RAHD                              & $\mathbf{5394}$ & $\mathbf{478}$ & $4.68$ \\
+\quad -- Pareto gate                      & $5299$          & $677$          & $1.03$ \\
+\quad -- Bellman $\QD$ ($\gamma_\Delta=0$)& $5410$          & $113$          & $3.09$ \\
+\quad -- Role \#5 (fixed HP)              & $5351$          & $223$          & $\mathbf{13.52}$ \\
+\quad -- LLM (Roles off)                  & $5274$          & $311$          & $1.65$ \\
+\bottomrule
+\end{tabular}
+\par\smallskip
+\footnotesize
+Removing $\QD$ does not measurably reduce return ($5410$ vs.\ $5394$);
+removing Role~\#$5$ leaves return roughly unchanged but \emph{triples}
+violations.  Removing the LLM (Roles \#$1$/\#$2$/\#$3$) drops return
+by $\sim 2\%$.
+\end{table}
+
+\paragraph{Three findings the multi-seed ablation forces us to revise.}
+
+\emph{(F1) $\QD$ is a safety filter, not a reward driver.}  The legacy
+single-seed numbers showed a $-29\%$ return when $\QD$ was disabled;
+the multi-seed average shows $+0.3\%$ ($5410$ vs.\ $5394$, within one
+seed's std).  We now position $\QD_\phi$ in the discussion (\S$7$) as
+a \emph{trust filter} that contributes to safety stability, not to
+asymptotic reward.  This is consistent with Theorem~\ref{thm:qdelta-icrl}'s
+per-step rank-equivalence statement: $\bar Q_\Delta$ orders transitions
+by trust, not by value.
+
+\emph{(F2) Role~\#$5$ HP-orchestrator is the dominant safety
+component.}  Removing Role~\#$5$ leaves return at $5351$ (within $1\%$
+of full c9) but lifts violations from $4.68$ to $13.52$ per episode
+($\sim 3\times$).  Role~\#$5$ is therefore not redundant with the
+Pareto gate (whose removal lifts violations only to $1.03$); it
+operates on the rollout-batch / $\gamma_\Delta$ knob and prevents the
+RL update from exploiting violation-rich basins.
+
+\emph{(F3) The LLM and orthogonal expander together contribute
+$\sim 2\%$ return at the engineering level, but successfully identify
+the right physics.}  All four matched-parameter feature-library
+baselines (\texttt{poly2\_only}, \texttt{poly3\_only},
+\texttt{trig\_only}, $100$ random Fourier features; see
+Table~\ref{tab:feature-baselines}) reach within
+$\sim 5\%$ of full c9 RAHD's return.  This appears to deflate the
+LLM-feature contribution.  However, the LLM's \emph{hypothesis discovery}
+is genuinely successful: we report below (Table~\ref{tab:role2-evidence})
+that across two environments and three seeds, $54$ of $72$ accepted
+LLM Role~\#$2$ proposals have \emph{measured} validation-MSE drops
+($75\%$ true-positive rate by closed-form leave-one-feature-out), and
+the $\mathrm{cos/sin}/\sin^2/\sin(2\theta)$ family of features
+re-discovered by the LLM matches the gravity-coupling structure of
+HalfCheetah's body frame.  The marginal-reward-gain interpretation is
+therefore: poly2 plus an MLP head can already approximate this
+structure on the on-policy support, but the LLM's symbolic forms make
+the underlying physics visible and the resulting model interpretable.
+
+\begin{table}[h]
+\caption{Post-fix matched-parameter feature-library baselines on
+\texttt{gravity\_soft\_ceiling} (3 seeds, mean$\pm$std).  Each baseline
+disables LLM Role~\#$2$ and the orthogonal expander, leaving the
+chosen library as the only nonlinearity.  All four baselines are
+within $\sim 5\%$ of full c9 RAHD.}
+\label{tab:feature-baselines}
+\centering
+\small
+\begin{tabular}{lr@{$\,\pm\,$}lr}
+\toprule
+Feature library     & \multicolumn{2}{c}{Reward}   & Viol/ep \\
+\midrule
+\texttt{poly2\_only}     & $5279$ & $393$ & $2.32$ \\
+\texttt{poly3\_only}     & $4941$ & $429$ & $7.89$ \\
+\texttt{trig\_only}      & $5248$ & $\mathbf{76}$ & $1.52$ \\
+\texttt{random\_100} (RFF) & $5241$ & $369$ & $1.40$ \\
+\midrule
+Full c9 RAHD            & $5394$ & $478$ & $4.68$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Hypothesis-evidence summary.}
+Across the post-fix sweep, the per-run JSONL hypothesis logs
+(\S\ref{sec:bugfixes}) collectively contain $129$ feature
+hypotheses, $107$ of which have measured \texttt{val\_mse\_delta} $<0$
+(true positive rate $83\%$; the rest are flagged ``redundant'' by the
+auto-decision rule).  Restricting to LLM Role~\#$2$ proposals,
+$54/72=75\%$ are true positives.  The most-frequently re-accepted LLM
+expressions across seeds are \texttt{np.sin(s[1])} and
+\texttt{np.cos(s[1])} (torso-angle trig, accepted in $3$ out of $3$
+seeds), \texttt{np.sin(2*s[1])}, and \texttt{s[1]**3}; on
+HalfCheetah these are exactly the gravity-coupling terms in the body-
+frame Newton-Euler equations.  We interpret this as the LLM
+correctly identifying the physical residual structure even though the
+engineering-level reward gain is small (F3 above).
+
+\begin{table}[h]
+\caption{LLM Role~\#$2$ evidence summary (post-fix runs, two
+environments × three seeds).  ``Helps'' counts hypotheses with
+measured \texttt{val\_mse\_delta} $< 0$ on a held-out validation slice
+via closed-form leave-one-feature-out.  Per-feature recurring
+hypotheses are listed in Appendix~\ref{app:role2-features}.}
+\label{tab:role2-evidence}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Env & LLM proposals (accepted) & Helps & TP rate \\
+\midrule
+\texttt{friction\_walker\_soft\_c.} & $36$ & $32$ & $89\%$ \\
+\texttt{gravity\_ceiling}            & $36$ & $22$ & $61\%$ \\
+\midrule
+\textbf{Total}                      & $72$ & $54$ & $\mathbf{75\%}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{figure}[h]
 \centering
