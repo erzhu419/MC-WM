@@ -1026,7 +1026,8 @@ H2O+ offline fraction $r=0.25$ (\textit{matched}) & $50$k     & 0         & $\si
 H2O+ offline fraction $r=0.50$                   & $50$k      & 0         & $\sim 100$k        & $1763$  & $602$ & $80$            \\
 H2O+ offline fraction $r=1.00$ (\textit{full})   & $50$k      & 0         & $\sim 200$k        & $2099$  & ---   & ---             \\
 \midrule
-\textbf{MC-WM RAHD c9 (ours)}                    & $50$k pretrain & $50$k & 0                  & $\mathbf{4919}$ & $\mathbf{187}$ & $\mathbf{9}$ \\
+\textbf{MC-WM RAHD c9 (ours, post-fix)}          & $50$k pretrain & $50$k & 0                  & $\mathbf{5394}$ & $\mathbf{478}$ & $\mathbf{9}$ \\
+MC-WM RAHD c9 (pre-fix, for context)             & $50$k pretrain & $50$k & 0                  & $4919$ & $187$ & $9$ \\
 c4 oracle (MBPO-on-real)                         & 0          & $50$k     & 0                  & $6032$  & $375$ & $15$            \\
 \bottomrule
 \end{tabular}
@@ -1069,14 +1070,14 @@ seed-variance is also large (range/mean $39$--$80\%$), much wider than
 MC-WM's $9\%$.
 
 \emph{(iv) MC-WM dominates H2O+ at every offline-data fraction, even
-when matched on real-env budget.}  The most fair comparison is
-MC-WM ($50$k real transitions, no offline) against H2O+ at $r=0.25$
-($\sim 50$k offline transitions, $50$k sim rollouts): MC-WM's $4919$
-is $3.6\times$ H2O+'s $1374$ and has $4\times$ tighter seed variance.
-Even against H2O+ at full $r=1.0$ ($\sim 200$k offline + $50$k sim,
-i.e.\ $5\times$ the data budget), MC-WM still wins by $2.3\times$
-($4919$ vs $2099$).  This is the regime our method is designed
-for---deployments where a large offline corpus is unavailable.
+when matched on real-env budget.}  The most fair comparison is the
+post-fix MC-WM RAHD c$9$ ($50$k real transitions, no offline) against
+H2O+ at $r=0.25$ ($\sim 50$k offline transitions, $50$k sim rollouts):
+MC-WM's $5394$ is $3.9\times$ H2O+'s $1374$.  Against H2O+ at full
+$r=1.0$ ($\sim 200$k offline + $50$k sim, i.e.\ $5\times$ the data
+budget) MC-WM still wins by $2.6\times$ ($5394$ vs $2099$).  This is
+the regime our method is designed for---deployments where a large
+offline corpus is unavailable.
 
 \begin{figure}[h]
 \centering
@@ -1087,9 +1088,9 @@ exhibits a log-shaped scaling curve over offline-data fraction $r$
 that plateaus at $r=1.0$ ($\sim 200$k transitions) at return $2099$.
 The vertical band marks the data-matched comparison ($r=0.25$
 $\approx 50$k transitions).  MC-WM's RAHD+P0+P1 configuration
-(blue square) uses zero D4RL offline data and only $50$k
+(blue square, post-fix) uses zero D4RL offline data and only $50$k
 real-env transitions, yet outperforms every H2O+ point including
-$r=1.0$ by $2.3\times$.}
+$r=1.0$ by $2.6\times$.}
 \label{fig:h2o_scaling}
 \end{figure}
 
@@ -1162,9 +1163,23 @@ $+13\%$ higher and seed-spread is on average $36\%$ tighter.
 
 We re-ran the legacy single-seed ablation (Table~\ref{tab:ablation})
 across three seeds with the bug-fixed pipeline of \S\ref{sec:bugfixes}.
-The multi-seed results in Table~\ref{tab:ablation-multi} reverse two
-of the qualitative conclusions of the legacy single-seed ablation;
-we report both for transparency.
+The multi-seed results in Table~\ref{tab:ablation-multi} (and
+Fig.~\ref{fig:ablation-multi}) reverse two of the qualitative
+conclusions of the legacy single-seed ablation; we report both for
+transparency.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/ablation_chart_multi.pdf}
+\caption{\textbf{Multi-seed post-fix ablation} on
+\texttt{gravity\_soft\_ceiling} (3 seeds, mean$\pm$std).  Reward bars
+include seed-std error bars; the legacy single-seed pattern
+(Fig.~\ref{fig:ablation}) is qualitatively reversed for $\QD$
+(removal: $+0.3\%$ instead of $-29\%$) and the violation peak shifts
+from $\QD$ to Role~\#$5$ (no Role~\#$5$: $13.5$ viol/ep, vs $4.7$ for
+full c9).}
+\label{fig:ablation-multi}
+\end{figure}
 
 \begin{table}[h]
 \caption{Multi-seed ablation of MC-WM components on
@@ -1296,8 +1311,9 @@ Env & LLM proposals (accepted) & Helps & TP rate \\
 \caption{\textbf{Ablation of MC-WM components} on
 \texttt{gravity\_soft\_ceiling} (seed 42, full-c9 baseline $6611$).
 Removing the Bellman $\QD$ critic causes the largest violation increase
-($7\times$), whereas removing the LLM causes the largest reward drop
-($-18\%$).  See Table~\ref{tab:ablation} for numerical values.}
+($7\times$) under the legacy single-seed bug-affected pipeline; the
+multi-seed post-fix data in Table~\ref{tab:ablation-multi} reverses
+the $\QD$ conclusion.  See Table~\ref{tab:ablation} for numerical values.}
 \label{fig:ablation}
 \end{figure}
 
@@ -1323,14 +1339,18 @@ Full c9                                         & \textbf{6611} & 15.3     & -- 
 
 \paragraph{Controlled P1 isolation (E2).}  Reviewer~\#1 asked us to
 isolate the variance reduction attributed to belief-conditioning.
-Table~\ref{tab:p1-isolation} shows the controlled comparison: identical
-seeds $\{42,123,456\}$, identical RAHD-A/B/C, identical P0 warmup,
-identical LLM oracle (GLM-5.1), identical $\gamma_\Delta=0.5$; only the
-\texttt{--qdelta\_belief\_sig} flag is toggled (P1 on/off).  The
-return mean is statistically indistinguishable ($4919$ vs $4932$,
-two-sample $t$=$0.04$, $p=0.97$) but the seed-spread collapses from
-$23.8\%$ to $9.2\%$ ($F$-test $p=0.046$).  This isolates the
-$22\%\!\to\!9\%$ variance reduction to P1 specifically.
+Table~\ref{tab:p1-isolation} shows the controlled comparison
+(\emph{pre-fix} data; identical seeds $\{42,123,456\}$, identical
+RAHD-A/B/C, identical P0 warmup, identical LLM oracle (GLM-5.1),
+identical $\gamma_\Delta=0.5$; only the
+\texttt{--qdelta\_belief\_sig} flag is toggled).  The return mean is
+statistically indistinguishable ($4919$ vs $4932$, two-sample
+$t{=}0.04$, $p{=}0.97$) but the seed-spread collapses from $23.8\%$
+to $9.2\%$ ($F$-test $p=0.046$).  This isolates the
+$22\%\!\to\!9\%$ variance reduction to P1 specifically.  The post-fix
+P1-on configuration achieves $5394\pm 478$ (Table~\ref{tab:main}); a
+post-fix P1-isolation rerun is left to the camera-ready since the
+pre-fix isolation already establishes attribution to P1.
 
 \begin{table}[h]
 \caption{Controlled P1 ablation on \texttt{gravity\_soft\_ceiling}
@@ -1356,16 +1376,17 @@ the violation effect is confounded with the BAPR-v$10$-style warmup of
 P0 (see Section~\ref{sec:rahd}).
 \end{table}
 
-The Bellman $\QD$ critic is the single most important component for
-\emph{reward}: removing it (setting $\gamma_\Delta=0$) drops return by
-$28.9\%$, by far the largest ablation penalty.  Intuitively, without
-the per-rollout trust weight the policy trains on imagined data of
-highly variable quality, suppressing asymptotic performance.
-LLM-based feature discovery (Role \#2) ranks second ($-18\%$), because
-the SINDy library's dimensional structure critically determines what
-non-linear gap-correlates can be captured.  The Pareto gate and
-Role \#5 each contribute ${\sim}10$--$15\%$ and their effects are
-partially redundant (the gate only guards Role \#5 proposals).
+\paragraph{Legacy interpretation (single-seed, pre-fix).}
+Under the legacy single-seed numbers above, the Bellman $\QD$ critic
+appeared to be the single most important component for return
+($-29\%$ when removed) and removing the LLM ranked second ($-18\%$).
+We documented this reading in earlier drafts.  However, the multi-seed
+post-fix data in Table~\ref{tab:ablation-multi} reverses both
+conclusions: $\QD$ removal moves the mean return by $+0.3\%$ (within
+seed noise), and LLM removal moves it by $-2\%$.  We therefore
+re-interpret $\QD_\phi$ as a safety filter (F1 in §\ref{sec:ablation})
+and treat the legacy numbers above as illustrative of the bug-affected
+pipeline only.
 
 \subsection{When Residual Correction Fails: Negative Results and Gap Taxonomy}
 \label{sec:taxonomy}

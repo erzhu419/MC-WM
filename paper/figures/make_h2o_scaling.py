@@ -53,14 +53,14 @@ ax.axhline(1460, color="#777", linestyle="--", linewidth=1.0, zorder=1,
 ax.axhline(6032, color="#777", linestyle="-.", linewidth=1.0, zorder=1,
            label="c4 oracle (MBPO-on-real): $6032$")
 
-# ── MC-WM marker ────────────────────────────────────────────────────────
+# ── MC-WM marker (post-fix) ─────────────────────────────────────────────
 mcwm_x = 0.0   # plot at "no offline" but visually distinct
-ax.errorbar([mcwm_x], [4919], yerr=[187],
+ax.errorbar([mcwm_x], [5394], yerr=[478],
             marker="s", markersize=10, linewidth=0,
             color="#264653", ecolor="#264653",
             elinewidth=1.5, capsize=5, zorder=5,
-            label="\\textbf{MC-WM RAHD c9 (ours, $50$k real)}: $4919$")
-ax.annotate("4919", (mcwm_x, 4919), xytext=(8, 0), textcoords="offset points",
+            label="\\textbf{MC-WM RAHD c9 (ours, $50$k real)}: $5394$")
+ax.annotate("5394", (mcwm_x, 5394), xytext=(8, 0), textcoords="offset points",
             ha="left", va="center", fontsize=9, fontweight="bold",
             color="#264653")
 
