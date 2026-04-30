@@ -10,6 +10,7 @@
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage{amsthm}
+\usepackage{multirow}
 \usepackage{nicefrac}
 \usepackage{microtype}
 \usepackage{xcolor}
@@ -1463,6 +1464,106 @@ batch.  If below ${\approx}35\%$, fall back to c1 (naive transfer) or c4
 (oracle training on real data).  This diagnostic is cheap (one
 regression on held-out Phase~1b data) and converts
 Theorem~\ref{thm:universal-false} into a pre-deployment check.
+
+\subsubsection{Single-factor sweeps (E5)}
+\label{sec:taxonomy-sweeps}
+
+The cross-morphology evidence above is anecdotal: each negative-result
+env differs from the positive ones in many factors at once.  The
+reviewer asked us (E5 in §\ref{sec:experimental-todo}) to vary
+\emph{one} factor at a time on a single morphology.  We ran an
+$11$-env sweep on HalfCheetah ($3$ seeds each, post-fix RAHD c9
+configuration), varying one of:
+
+\begin{itemize}
+\item \textbf{gravity factor} $\in \{1.5,2.0,3.0,4.0\}$
+(physics-dynamics gap; expected: works);
+\item \textbf{observation noise std} on \texttt{obs[8:17]}
+$\in\{0.5,1.0,2.0,5.0\}$
+(observation gap; expected: fails per Thm.~\ref{thm:universal-false});
+\item \textbf{actuator scale} $\in\{0.5,1.0,2.0\}$
+(actuator gap; expected: fails per Thm.~\ref{thm:universal-false}).
+\end{itemize}
+
+Fig.~\ref{fig:taxonomy-sweeps} shows the resulting
+return$(\textrm{factor})$ curves; Table~\ref{tab:taxonomy-sweeps}
+reports the underlying numbers.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.99\linewidth]{figures/gap_taxonomy_sweeps.pdf}
+\caption{\textbf{Single-factor gap-taxonomy sweeps on HalfCheetah}
+($3$ seeds each, post-fix RAHD c9; mean$\pm$std).
+\textbf{(a) Physics gap (gravity $\times$).} MC-WM works across the
+entire sweep $1.5\times\!\to\!4.0\times$; returns sit between $4936$
+and $5594$, all well above raw sim ($494$).
+\textbf{(b) Observation gap (Gaussian std on velocities).}  A sharp
+cliff: $\sigma=0.5\!\to\!3358$ ($-39\%$), $\sigma=1.0\!\to\!94$,
+$\sigma=2.0\!\to\!-28$, $\sigma=5.0\!\to\!-277$.  By $\sigma=1.0$ the
+method has effectively collapsed; this is the strongest empirical
+confirmation of Thm.~\ref{thm:universal-false}.
+\textbf{(c) Actuator gap (sim-side action scale).}  Returns
+$5006\!\to\!5251\!\to\!5001$ over $0.5\!\to\!1.0\!\to\!2.0$: the method
+remains robust across this range, contrary to the prior anecdotal
+``actuator gap is a fail case'' reading.  We update the gap-taxonomy
+text below to reflect this.}
+\label{fig:taxonomy-sweeps}
+\end{figure}
+
+\begin{table}[h]
+\caption{Single-factor gap-taxonomy sweeps, all on HalfCheetah morphology
+with the post-fix RAHD c9 pipeline (3 seeds each).}
+\label{tab:taxonomy-sweeps}
+\centering
+\small
+\begin{tabular}{lcr@{$\,\pm\,$}lr}
+\toprule
+Sweep & Factor value & \multicolumn{2}{c}{Return} & Viol/ep \\
+\midrule
+\multirow{4}{*}{Gravity (physics)}    & $1.5\times$ & $5327$ & $402$ & $20.79$ \\
+                                      & $2.0\times$ & $5594$ & $299$ & $1.76$  \\
+                                      & $3.0\times$ & $5068$ & $230$ & $6.74$  \\
+                                      & $4.0\times$ & $4936$ & $300$ & $0.51$  \\
+\midrule
+\multirow{4}{*}{Obs.\ noise std}      & $0.5$       & $3358$ & $235$ & $14.38$ \\
+                                      & $1.0$       & $94$   & $114$ & $0.06$  \\
+                                      & $2.0$       & $-28$  & $81$  & $0.99$  \\
+                                      & $5.0$       & $-277$ & $70$  & $2.49$  \\
+\midrule
+\multirow{3}{*}{Actuator scale (sim)} & $0.5\times$ & $5006$ & $342$ & $5.89$  \\
+                                      & $1.0\times$ & $5251$ & $265$ & $1.53$  \\
+                                      & $2.0\times$ & $5001$ & $477$ & $1.83$  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Implications for the gap taxonomy (re-stated).}
+The single-factor sweeps refine the prior cross-morphology reading in
+two important ways.
+
+\emph{(T1) The physics--observation cliff is sharp and clean.}  On
+HalfCheetah specifically, observation noise destroys MC-WM at
+$\sigma\!\ge\!1.0$ (return $\le 94$, $-98\%$ vs.\ no noise) while
+gravity factors as large as $4\times$ leave return at $4936$
+($-9\%$ vs.\ the $2\times$ sweet spot).  The same morphology ablation
+removes any morphology-confound and provides a quantitative
+confirmation of Thm.~\ref{thm:universal-false}.
+
+\emph{(T2) The actuator gap is benign in the tested range.}  The
+$0.5\!\to\!2.0\times$ actuator scaling sweep stays $\ge 5000$.  We
+therefore retract the prior anecdotal claim that ``actuator gap''
+universally fails: in our experiments it depends on the magnitude and
+in the moderate range MC-WM is robust.  We expect this to break at
+larger scalings (e.g., $5\times$) where the simulator's contact-force
+clipping interacts with the action saturation; a follow-up sweep is
+left to future work.
+
+\emph{(T3) The $35\%$-residual diagnostic threshold is consistent
+with the sweep data.}  Fitting the gravity-sweep ratios into the
+$c9/c1$-vs-residual-improvement plane (Fig.~\ref{fig:taxonomy})
+preserves the original threshold within seed noise; the
+observation-noise sweep extends the lower edge of the
+``correction-ineffective'' region.
 
 \subsection{Acknowledged Experimental Limitations and Planned Additions}
 \label{sec:experimental-todo}
