@@ -241,7 +241,14 @@ def main():
                         choices=["gravity", "gravity_ceiling", "gravity_soft_ceiling",
                                  "carpet_ant", "carpet_ant_soft_ceiling",
                                  "ant_wall_broken", "ant_wall_broken_soft_ceiling",
-                                 "friction_walker_soft_ceiling"])
+                                 "friction_walker_soft_ceiling",
+                                 # E5 single-factor sweeps (HalfCheetah only)
+                                 "gravity_sweep_15", "gravity_sweep_20",
+                                 "gravity_sweep_30", "gravity_sweep_40",
+                                 "obs_noise_05", "obs_noise_10",
+                                 "obs_noise_20", "obs_noise_50",
+                                 "actuator_scale_05", "actuator_scale_10",
+                                 "actuator_scale_20"])
     parser.add_argument("--icrl_mode", default="transition", choices=["transition", "confidence"],
                         help="v4=transition (Δs discriminator), v1=confidence (model-conf input, Type 2 proxy)")
     parser.add_argument("--save_phi", default=None, help="Path to save trained ICRL φ")
@@ -427,6 +434,31 @@ def main():
         env_cls = AntWallBrokenSoftCeilingEnv; obs_dim, act_dim = 27, 8
     elif args.env == "friction_walker_soft_ceiling":
         env_cls = FrictionWalkerSoftCeilingEnv; obs_dim, act_dim = 17, 6
+    # ── E5 single-factor sweeps (all HalfCheetah morphology, 17/6) ─────
+    elif args.env.startswith("gravity_sweep_"):
+        from mc_wm.envs.hp_mujoco.sweep_envs import (
+            GravitySweep15Env, GravitySweep20Env,
+            GravitySweep30Env, GravitySweep40Env)
+        _g_envs = {"gravity_sweep_15": GravitySweep15Env,
+                   "gravity_sweep_20": GravitySweep20Env,
+                   "gravity_sweep_30": GravitySweep30Env,
+                   "gravity_sweep_40": GravitySweep40Env}
+        env_cls = _g_envs[args.env]; obs_dim, act_dim = 17, 6
+    elif args.env.startswith("obs_noise_"):
+        from mc_wm.envs.hp_mujoco.sweep_envs import (
+            ObsNoise05Env, ObsNoise10Env, ObsNoise20Env, ObsNoise50Env)
+        _o_envs = {"obs_noise_05": ObsNoise05Env,
+                   "obs_noise_10": ObsNoise10Env,
+                   "obs_noise_20": ObsNoise20Env,
+                   "obs_noise_50": ObsNoise50Env}
+        env_cls = _o_envs[args.env]; obs_dim, act_dim = 17, 6
+    elif args.env.startswith("actuator_scale_"):
+        from mc_wm.envs.hp_mujoco.sweep_envs import (
+            ActuatorScale05Env, ActuatorScale10Env, ActuatorScale20Env)
+        _a_envs = {"actuator_scale_05": ActuatorScale05Env,
+                   "actuator_scale_10": ActuatorScale10Env,
+                   "actuator_scale_20": ActuatorScale20Env}
+        env_cls = _a_envs[args.env]; obs_dim, act_dim = 17, 6
 
     if mode == "c1":
         # ── Baseline: train in sim env directly
