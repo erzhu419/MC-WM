@@ -1558,12 +1558,41 @@ larger scalings (e.g., $5\times$) where the simulator's contact-force
 clipping interacts with the action saturation; a follow-up sweep is
 left to future work.
 
-\emph{(T3) The $35\%$-residual diagnostic threshold is consistent
-with the sweep data.}  Fitting the gravity-sweep ratios into the
-$c9/c1$-vs-residual-improvement plane (Fig.~\ref{fig:taxonomy})
-preserves the original threshold within seed noise; the
-observation-noise sweep extends the lower edge of the
-``correction-ineffective'' region.
+\emph{(T3) The $35\%$-residual diagnostic survives the sweep, but
+needs a gap-type qualifier.}  We re-fit the threshold by bootstrapping
+a logistic regression of ``works'' against the residual-improvement
+ratio over $16$ envs (the $11$ E5 sweep envs $+$ the original $5$
+cross-morphology envs).  The point estimate is $\mathbf{0.316}$
+(31.6\%) with a $\mathbf{95\%}$ bootstrap CI of $[-0.067,\,0.485]$ and
+inter-quartile range $[0.208,\,0.397]$ (Fig.~\ref{fig:threshold-fit}).
+The prior heuristic $0.35$ lies within the IQR.  The wide CI is
+attributable to the observation-noise sweep: \texttt{obs\_noise\_05}
+has gap $0.61$ but works, while \texttt{obs\_noise\_10/20/50} have
+gap $0.27\!-\!0.46$ and fail---i.e.\ residual-improvement ratio alone
+is \emph{not} sufficient to separate works from fails when the gap
+is observation-level.  We therefore replace the original
+``$\mathrm{gap}\ge 35\%\Rightarrow$ works'' diagnostic with a
+two-stage rule: (1) check \emph{type} of gap (physics-dynamics vs.\
+observation/actuator); (2) within physics-dynamics gaps, the $35\%$
+threshold holds.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.78\linewidth]{figures/gap_taxonomy_threshold_fit.pdf}
+\caption{\textbf{Re-fit of the gap-taxonomy diagnostic threshold} on
+the $11$ E5 single-factor sweep envs plus the $5$ cross-morphology
+envs (16 total, 3 seeds each).  Each point is one env at its
+mean residual-improvement ratio (x) and post-fix RAHD c$9$ return
+(y); marker style indicates the binary ``works'' label
+(\texttt{works} $\Leftrightarrow$ return $> 1.5\!\times$ raw sim).
+Logistic-regression fit by bootstrap ($n=2000$) gives a point
+estimate of $0.316$ (dashed line) with IQR $[0.21, 0.40]$ (gray
+band).  The prior $0.35$ heuristic (dotted line) lies in the IQR.
+The mismatch between low-gap obs-noise envs that fail and high-gap
+obs-noise envs that succeed is what widens the CI; see (T3) for the
+two-stage diagnostic.}
+\label{fig:threshold-fit}
+\end{figure}
 
 \subsection{Acknowledged Experimental Limitations and Planned Additions}
 \label{sec:experimental-todo}
