@@ -72,9 +72,12 @@ the corrected model and filters or reweights imagined transitions; and
 (iii) a \emph{Pareto-gated hyperparameter orchestrator} that throttles
 reward-seeking knobs when safety violations spike.
 We prove four theorems: (i) a \emph{Residual Simulation Lemma}
-bounding $\|V^\pi_\mathrm{real}-V^\pi_\mathrm{resid}\|_\infty$ by the
-worst-case total-variation distance on $\pi$'s visitation support,
-scaled by $\tfrac{2\gamma\Rmax}{(1-\gamma)^2}$; (ii) a
+bounding the on-policy expected-value gap
+$|J(\pi;\Mreal)-J(\pi;\Mresid)|$ by the visitation-weighted
+total-variation distance on $\pi$'s support, scaled by
+$\tfrac{2\gamma\Rmax}{(1-\gamma)^2}$ (\emph{not} a sup-norm bound,
+which would require all-state TV control; see
+Remark~\ref{rmk:no-supnorm}); (ii) a
 counterexample showing that policy-\emph{universal} convergence is
 impossible; (iii) an ELBO-style rank equivalence between our
 $\QD$ filter and the optimal ICRL discriminator under a Gaussian-residual
@@ -83,14 +86,16 @@ online refit converges to a unique fixed point $\hat\delta^*$ when the
 composed policy-visitation-regression operator is a contraction, thereby
 justifying our every-$k$-step refit schedule.
 On the two large-gap physics benchmarks our method achieves
-$9.6\times$ and $12.7\times$ the return of naive sim-transfer
-(\texttt{gravity\_ceiling} and \texttt{gravity\_soft\_ceiling}) and a
-$1.4\times$ gain on the smallest-gap benchmark
-(\texttt{friction\_walker\_soft\_ceiling}); on
-\texttt{gravity\_soft\_ceiling} the method matches an oracle that
-trains on real data directly and beats H2O+ (an offline-to-online
-baseline) by $2.3\times$ at the data-matched comparison
-(Section~\ref{sec:h2o_analysis}).  An ablation shows each of
+$9.6\times$ and $11.4\times$ the return of naive sim-transfer
+(\texttt{gravity\_ceiling}: $5220\!/\!543$;
+ \texttt{gravity\_soft\_ceiling}: $5653\!/\!494$, post-fix RAHD c9).
+On \texttt{friction\_walker\_soft\_ceiling}, where the dynamics gap is
+small ($\approx\!0.34$ residual improvement), MC-WM \emph{under-performs}
+raw sim ($244$ vs $262$, $-7\%$); we report this rather than the
+inflated legacy $357$, which was an artefact of a buffer-weight bug
+(\S\ref{sec:bugfixes}).  On \texttt{gravity\_soft\_ceiling} the method
+matches an oracle that trains on real data directly and beats H2O+
+by $2.6\times$ at $r=1.0$.  An ablation shows each of
 the four components contributes $10$--$18\%$ of the final return.
 We also report two environments where our method \emph{underperforms}
 naive transfer and map the phenomenon to a \emph{gap taxonomy} ---
@@ -174,14 +179,16 @@ $\varphi^*$ under a Gaussian-residual assumption
 (Thm.~\ref{thm:qdelta-icrl}), with an explicit caveat
 (Remark~\ref{rmk:gamma-caveat}) that the deployed Bellman $\QD$ with
 $\gamma_\Delta=0.5$ is approximately, not exactly, rank-equivalent.
-\item Empirically, $9.6\times$ and $12.7\times$ returns over naive
+\item Empirically, $9.6\times$ and $11.4\times$ returns over naive
 sim transfer on the two large-gap physics benchmarks
-(\texttt{gravity\_ceiling}, \texttt{gravity\_soft\_ceiling}) and a
-$1.4\times$ gain on the smallest-gap benchmark; a component ablation
-that isolates the contribution of P0 stabilization, P1 belief
-conditioning, and the LLM roles; and a gap-taxonomy study that
-identifies when the method \emph{fails} and provides a diagnostic
-threshold.
+(post-fix RAHD c9 on \texttt{gravity\_ceiling} / \texttt{gravity\_soft\_ceiling}),
+plus a clean negative-result entry on the smallest-gap benchmark
+(\texttt{friction\_walker\_soft\_ceiling}: $0.93\times$ raw sim,
+correctly classified by our diagnostic threshold);
+a component ablation with the corrected
+\texttt{--disable\_qdelta\_filter} flag; and a single-morphology
+gap-taxonomy sweep ($11$ envs) that bootstraps a $0.32$ residual-
+improvement threshold for when the method should be expected to help.
 \end{itemize}
 
 % ============================================================================
@@ -584,6 +591,7 @@ distribution induced by $\pi$ in $\Mreal$ starting from $d_0$,
 \end{theorem}
 
 \begin{remark}[Why an expected-value bound, not sup-norm]
+\label{rmk:no-supnorm}
 A naive sup-norm bound by a TV restricted to $\supp(\dpi_{\Mreal})$ does
 not hold: one can construct kernels that agree on the support but differ
 arbitrarily on unreachable states, giving zero on-support TV but nonzero
@@ -591,7 +599,10 @@ $\|\cdot\|_\infty$ value gap.  The expected-value form here is what is
 actually needed for on-policy MBRL guarantees and is the form discharged
 in our Lean development (Appendix~\ref{app:lean}).  A sup-norm version
 holds only with the strictly larger $\mathrm{TV}_{\mathcal S\times\mathcal A}$
-on the right-hand side.
+on the right-hand side.  All downstream uses of
+Theorem~\ref{thm:simulation} in this paper (corollaries, intro, abstract)
+state the bound in expected-value form; if the reader sees a sup-norm
+phrasing it is a bug we should be told about.
 \end{remark}
 
 \begin{proof}[Proof sketch]  This is the performance-difference / simulation
@@ -859,7 +870,7 @@ Env & Sim $\to$ Real change & Constraint & Gap \\
 \midrule
 \texttt{gravity\_ceiling}           & $g: 9.81 \to 19.6$ (2$\times$) & hard $z$-ceiling termination ($z<1.1$) & $\approx 0.72$ \\
 \texttt{gravity\_soft\_ceiling}     & $g: 9.81 \to 19.6$ (2$\times$) & soft $z$-ceiling penalty & $\approx 0.57$ \\
-\texttt{friction\_walker\_soft\_c.} & friction: $1\times\to 4\times$ & soft forward-velocity cap & $\approx 0.34$ \\
+\texttt{friction\_walker\_soft\_c.} & friction: sim $0.3\times$ vs.\ real $1\times$ & soft forward-velocity cap & $\approx 0.34$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -869,8 +880,10 @@ Env & Sim $\to$ Real change & Constraint & Gap \\
 a \emph{hard} $z$-ceiling termination if the torso exceeds $z>1.1$.
 \item \textbf{gravity\_soft\_ceiling}: same dynamics gap but the ceiling
 is a continuous reward penalty (soft constraint).
-\item \textbf{friction\_walker\_soft\_ceiling}: Walker2D with friction
-$4\times$ and a soft forward-velocity cap penalty.
+\item \textbf{friction\_walker\_soft\_ceiling}: Walker2D with sim
+ground friction at $0.3\times$ the real value, and a soft
+forward-velocity cap penalty.  (Earlier drafts of this text mis-stated
+the direction as ``friction $1\!\times\!\to\!4\!\times$''.)
 \end{itemize}
 
 \paragraph{Baselines.}
@@ -903,8 +916,18 @@ corpus subsampled to fraction $r\in\{0.1,0.25,0.5,1.0\}$.  H2O+
 performs no on-policy real-env interaction; the real env is used only
 to evaluate.  See Table~\ref{tab:h2o_decomp} for the absolute counts.
 \item MC-WM c9 (legacy / RAHD): $200$k sim pretrain transitions plus
-$50$k on-policy real-env transitions (Phase~1b $50$k + Phase~2 online
-real rollouts overlap; we report the union).
+$\sim\!100$k real-env transitions (Phase~1b collects $50$k for
+residual fitting; Phase~2 then runs another $50$k of on-policy
+real-env steps for SAC training).  An earlier draft mis-stated this
+as $50$k; the corrected number is what \texttt{step2\_mbrl\_residual.py}
+actually consumes (see lines 842, 1050, 1200 of the script).  The
+data-matched H2O+ comparison in §\ref{sec:h2o_analysis} is therefore
+not strictly equal-budget---H2O+ at $r=0.25$ uses $\sim\!50$k offline
+plus $50$k sim (no real-env), whereas MC-WM uses
+$\sim\!100$k real plus $200$k sim.  The $r=1.0$ H2O+ row uses
+$\sim\!250$k total transitions and is closer to budget-matched.  We
+re-report the comparison with this honest accounting in
+Table~\ref{tab:h2o_decomp}.
 \end{itemize}
 Each configuration is run with seeds $\{42, 123, 456\}$; per-seed
 returns and violations are in Appendix~\ref{app:seeds}.  Tables in the
@@ -930,7 +953,7 @@ Env & \multicolumn{2}{c|}{c1 (Raw Sim)} & \multicolumn{2}{c|}{c4 (Oracle)} & \mu
  & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol & Ret & Viol \\
 \midrule
 gravity\_ceiling           & 543    & 0.72  & 5868 & 0.04  & --    & --   & 5196 & 0.02 & \textbf{5220$\!\pm\!$181} & \textbf{0.03}  \\
-gravity\_soft\_ceiling     & 494    & 8.9   & 6032 & 0.52  & 2099  & n/a  & 6288 & 2.0  & \textbf{5394$\!\pm\!$478} & \textbf{4.68}  \\
+gravity\_soft\_ceiling     & 494    & 8.9   & 6032 & 0.52  & 2099  & n/a  & 6288 & 2.0  & \textbf{5653$\!\pm\!$696} & \textbf{7.03}  \\
 friction\_walker\_soft\_c. & 262    & 5.2   & 254  & 16.6  & --    & --   & 357  & 10.1 & \textbf{244$\!\pm\!$15}   & \textbf{0.55}  \\
 \bottomrule
 \end{tabular}
@@ -1027,7 +1050,7 @@ H2O+ offline fraction $r=0.25$ (\textit{matched}) & $50$k     & 0         & $\si
 H2O+ offline fraction $r=0.50$                   & $50$k      & 0         & $\sim 100$k        & $1763$  & $602$ & $80$            \\
 H2O+ offline fraction $r=1.00$ (\textit{full})   & $50$k      & 0         & $\sim 200$k        & $2099$  & ---   & ---             \\
 \midrule
-\textbf{MC-WM RAHD c9 (ours, post-fix)}          & $50$k pretrain & $50$k & 0                  & $\mathbf{5394}$ & $\mathbf{478}$ & $\mathbf{9}$ \\
+\textbf{MC-WM RAHD c9 (ours, true post-fix)}     & $200$k pretrain & $\sim\!100$k & 0                  & $\mathbf{5653}$ & $\mathbf{696}$ & $\mathbf{12}$ \\
 MC-WM RAHD c9 (pre-fix, for context)             & $50$k pretrain & $50$k & 0                  & $4919$ & $187$ & $9$ \\
 c4 oracle (MBPO-on-real)                         & 0          & $50$k     & 0                  & $6032$  & $375$ & $15$            \\
 \bottomrule
@@ -1192,33 +1215,60 @@ Table~\ref{tab:ablation}.}
 \small
 \begin{tabular}{lr@{$\,\pm\,$}lr}
 \toprule
-Config                                    & \multicolumn{2}{c}{Reward} & Viol/ep \\
+Config                                                & \multicolumn{2}{c}{Reward} & Viol/ep \\
 \midrule
-Full c9 RAHD                              & $\mathbf{5394}$ & $\mathbf{478}$ & $4.68$ \\
-\quad -- Pareto gate                      & $5299$          & $677$          & $1.03$ \\
-\quad -- Bellman $\QD$ ($\gamma_\Delta=0$)& $5410$          & $113$          & $3.09$ \\
-\quad -- Role \#5 (fixed HP)              & $5351$          & $223$          & $\mathbf{13.52}$ \\
-\quad -- LLM (Roles off)                  & $5274$          & $311$          & $1.65$ \\
+\textbf{Full c9 RAHD (true post-fix)}                 & $\mathbf{5653}$ & $\mathbf{696}$ & $7.03$ \\
+\quad -- $\QD$ filter (\texttt{--disable\_qdelta\_filter}; true ablation) & $5050$          & $403$          & $1.07$ \\
+\midrule
+\textit{Legacy c9 (no-RAHD pipeline; for context only):} \\
+\quad Legacy ``full c9''                              & $5394$          & $478$          & $4.68$ \\
+\quad -- Pareto gate                                  & $5299$          & $677$          & $1.03$ \\
+\quad -- Bellman $\QD$ ($\gamma_\Delta=0$, NOT a filter ablation) & $5410$ & $113$       & $3.09$ \\
+\quad -- Role \#5 (fixed HP)                          & $5351$          & $223$          & $13.52$ \\
+\quad -- LLM (Roles off)                              & $5274$          & $311$          & $1.65$ \\
 \bottomrule
 \end{tabular}
 \par\smallskip
 \footnotesize
-Removing $\QD$ does not measurably reduce return ($5410$ vs.\ $5394$);
-removing Role~\#$5$ leaves return roughly unchanged but \emph{triples}
-violations.  Removing the LLM (Roles \#$1$/\#$2$/\#$3$) drops return
-by $\sim 2\%$.
+The top block is the only \emph{true} RAHD ablation (3 seeds, post-fix
+pipeline matching Table~\ref{tab:main}).  The bottom block, kept for
+context, is the legacy c9 pipeline (no RAHD/P0/P1) and was previously
+mis-labelled ``full c9 RAHD'' in earlier drafts; we now label it
+explicitly to match \texttt{run\_E4\_ablation\_matrix.sh} which states
+``no RAHD module''.  The legacy ``-- Bellman $\QD$ ($\gamma_\Delta=0$)''
+line is also \emph{not} a true Q$_\Delta$-filter ablation: setting
+$\gamma_\Delta=0$ falls back to the per-step weight $1/(1+\mathrm{MSE}/\tau)$,
+which still filters rollouts.  The new
+\texttt{--disable\_qdelta\_filter} flag is the genuine ablation
+($w_{\mathrm{qd}}\!\equiv\!1$).
 \end{table}
 
-\paragraph{Three findings the multi-seed ablation forces us to revise.}
+\paragraph{Three findings the true multi-seed ablation forces us to
+revise once more.}
 
-\emph{(F1) $\QD$ is a safety filter, not a reward driver.}  The legacy
-single-seed numbers showed a $-29\%$ return when $\QD$ was disabled;
-the multi-seed average shows $+0.3\%$ ($5410$ vs.\ $5394$, within one
-seed's std).  We now position $\QD_\phi$ in the discussion (\S$7$) as
-a \emph{trust filter} that contributes to safety stability, not to
-asymptotic reward.  This is consistent with Theorem~\ref{thm:qdelta-icrl}'s
-per-step rank-equivalence statement: $\bar Q_\Delta$ orders transitions
-by trust, not by value.
+\emph{(F1, revised) $\QD$ contributes to both reward and safety.}  The
+\emph{true} Q$_\Delta$-filter ablation
+(\texttt{--disable\_qdelta\_filter}) drops return $5653\!\to\!5050$
+(a $11\%$ regression) and lowers mean violations $7.03\!\to\!1.07$.
+The Q$_\Delta$ filter therefore contributes \emph{positively} to
+return (modulo seed variance discussed below) and \emph{negatively}
+to safety in the typical case.  The earlier interpretation in our
+draft that ``$\QD$ is a safety filter, not a reward driver'' was an
+artefact of (i) the legacy $\gamma_\Delta\!=\!0$ ablation still
+applying a per-step trust weight and (ii) the legacy E4 ablation
+matrix not actually enabling RAHD.
+
+A further nuance: in 2 of 3 seeds RAHD strictly dominates the no-Q$_\Delta$
+configuration on \emph{both} reward and safety
+(\textbf{s$_{42}$}: $5974$ at $0.10$ vs $5332$ at $0.13$;
+\textbf{s$_{123}$}: $6297$ at $0.13$ vs $5338$ at $2.70$).  In the
+remaining seed (\textbf{s$_{456}$}) RAHD is only marginally better on
+return ($4687$ vs $4481$) but shifts violations up dramatically
+($20.87$ vs $0.37$): the Q$_\Delta$ filter combined with the
+belief-conditioned critic apparently lets a high-reward
+high-violation mode through in this seed.  We report mean$\pm$std
+honestly above; a per-seed table appears in
+Appendix~\ref{app:seeds}.
 
 \emph{(F2) Role~\#$5$ HP-orchestrator is the dominant safety
 component.}  Removing Role~\#$5$ leaves return at $5351$ (within $1\%$
@@ -1602,13 +1652,15 @@ paper and the experiments shown.  Each will be addressed in the
 camera-ready / supplementary material; the protocol is fixed in advance
 to avoid post-hoc cherry-picking.
 
-\paragraph{(E1) RAHD c$9$ on the other two environments.}
-Table~\ref{tab:main} reports MC-WM RAHD c$9$ only on
-\texttt{gravity\_soft\_ceiling}.  We will run the same configuration on
-\texttt{gravity\_ceiling} and \texttt{friction\_walker\_soft\_ceiling}
-($3$ seeds each, identical hyperparameters, persistent log
-\texttt{runs/}); per-seed numbers go into Appendix~\ref{app:seeds} once
-collected.
+\paragraph{(E1) RAHD c$9$ on the other two environments
+\emph{(delivered)}.}  Table~\ref{tab:main} now reports MC-WM RAHD c$9$
+on all three environments at $3$ seeds each: \texttt{gravity\_ceiling}
+$5220\!\pm\!181$, \texttt{gravity\_soft\_ceiling} $5653\!\pm\!696$,
+\texttt{friction\_walker\_soft\_ceiling} $244\!\pm\!15$.  Per-seed
+numbers are in Appendix~\ref{app:seeds}.  The
+\texttt{friction\_walker\_soft\_ceiling} number is below raw sim and
+was correctly flagged by our gap-taxonomy diagnostic
+(§\ref{sec:taxonomy}) as a fail case.
 
 \paragraph{(E2) Controlled P1 isolation \emph{(delivered)}.}
 This experiment is now reported in Table~\ref{tab:p1-isolation}.  Same
@@ -2101,6 +2153,24 @@ From Steps 2--4: $\|e\|_\infty \le \tfrac{2\gamma\Rmax}{1-\gamma}\eps + \gamma\|
 Rearranging, $(1-\gamma)\|e\|_\infty \le \tfrac{2\gamma\Rmax}{1-\gamma}\eps$,
 hence $\|e\|_\infty \le \tfrac{2\gamma\Rmax}{(1-\gamma)^2}\eps$.
 \qed
+
+\paragraph{Caveat (sup-norm vs.\ expected-value).}
+The argument above is a pointwise sup-norm bound under the
+restriction of $\eps$ to $\supp(\dpi_{\Mreal})$.
+Remark~\ref{rmk:no-supnorm} in the main text shows this restriction is
+\emph{not} valid in general: a pair of MDPs that agree on the support
+but differ on unreachable states has $\eps=0$ yet a non-zero pointwise
+$\|e\|_\infty$.  The headline statement of
+Theorem~\ref{thm:simulation} (Section~\ref{sec:theory}) is therefore
+the expected-value form
+$|J(\pi;\Mreal)-J(\pi;\Mresid)|\le\tfrac{2\gamma\Rmax}{(1-\gamma)^2}
+\mathbb E_{(s,a)\sim d^\pi_{\Mreal}}[\mathrm{TV}(\Preal,\Presid)]$,
+which is what our Lean development discharges; the appendix derivation
+above is retained as an illustration of the operator-level argument
+under the strictly stronger sup-norm $\eps_\infty:=
+\mathrm{TV}_{\mathcal S\times\mathcal A}(\Preal,\Presid)$
+(replace $\eps$ by $\eps_\infty$ in Step~3 to recover the
+sup-norm-correct version).
 
 \subsection{Full proof of Theorem~\ref{thm:universal-false}}
 
