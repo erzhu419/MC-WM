@@ -265,6 +265,12 @@ def main():
                              "Default: enabled (BAPR v10 piece).")
     parser.add_argument("--alpha_floor", type=float, default=0.01,
                         help="Floor on SAC entropy α to prevent collapse (BAPR v10).")
+    parser.add_argument("--disable_qdelta_filter", action="store_true",
+                        help="True ablation of the QΔ trust filter: forces "
+                             "w_qdelta = 1 for every imagined transition, "
+                             "regardless of --qdelta_gamma.  Distinct from "
+                             "--qdelta_gamma 0, which falls back to a per-step "
+                             "weight 1/(1+MSE/τ) and therefore still filters.")
     parser.add_argument("--qdelta_belief_sig", action="store_true",
                         help="P1: feed per-dim residual ensemble std as a "
                              "vector signature to the QΔ critic, instead of "
@@ -1052,12 +1058,33 @@ def main():
 
         # Constraint systems (Role #1 + Role #3 audit).  Reuse the same Claude
         # oracle instance as SINDy+NAU so cache/stats are unified.
+        # Map the env-name to the morphology family so the hardcoded
+        # physics predicates use the right obs dimensions; HalfCheetah and
+        # the obs/actuator/gravity sweeps share the cheetah morphology
+        # (17/6); Walker is its own family; Ant variants are 27/8.
         constraint_sys = None
         if mode == "c9":
+            env_name = args.env
+            if (env_name.startswith("gravity") or env_name.startswith("obs_noise")
+                    or env_name.startswith("actuator_scale")):
+                _cs_env_type = "gravity_cheetah"
+            elif env_name.startswith("friction_walker"):
+                _cs_env_type = "friction_walker"
+            elif env_name.startswith("carpet") or env_name.startswith("ant"):
+                _cs_env_type = "ant"
+            else:
+                _cs_env_type = env_name  # let ConstraintSystem decide / no init
+            # Pass the Phase-1b real buffer so LLM Role #1 constraints are
+            # FPR-validated on actual real-env data (reviewer's #7).  At
+            # this point s_real / a_real / s2_real / r_real have just been
+            # collected from the real env above.
+            _real_buf = (s_real, a_real, s2_real, r_real)
             constraint_sys = ConstraintSystem(
-                env_type="gravity_cheetah", log_fn=log,
+                env_type=_cs_env_type, log_fn=log,
                 claude_oracle=_claude,  # None if --use_claude_llm not set
                 env_description_for_llm=_env_desc,
+                real_buffer_for_fpr=_real_buf,
+                fpr_threshold=0.01,
             )
 
         # γ > 0 Bellman QΔ (log-confidence critic, aligned with
@@ -1267,7 +1294,13 @@ def main():
                         start_states, actions, deterministic=False)
 
                     if mode in ("c9", "c10"):
-                        if qdelta_bellman is not None:
+                        if args.disable_qdelta_filter:
+                            # True ablation: force every imagined rollout
+                            # to pass through with weight 1.  Distinct from
+                            # --qdelta_gamma 0 which still applies a
+                            # per-step trust weight.
+                            w_qdelta = np.ones(len(start_states), dtype=np.float32)
+                        elif qdelta_bellman is not None:
                             # Bellman QΔ critic: w = exp(QΔ(s,a)), γ>0 propagation.
                             # No action-mismatch issue here — the trained critic
                             # was fit on real (s,a,s') transitions and evaluated

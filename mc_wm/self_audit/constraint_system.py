@@ -44,7 +44,8 @@ class ConstraintSystem:
     """
 
     def __init__(self, env_type="gravity_cheetah", log_fn=None,
-                 claude_oracle=None, env_description_for_llm: str = ""):
+                 claude_oracle=None, env_description_for_llm: str = "",
+                 real_buffer_for_fpr=None, fpr_threshold: float = 0.01):
         self._log = log_fn or (lambda msg: print(msg, flush=True))
         self.constraints: List[Constraint] = []
         self._n_checked = 0
@@ -84,7 +85,8 @@ class ConstraintSystem:
 
         # Role #1 LLM extension: ask Claude for additional env-specific constraints.
         if self._claude_oracle is not None and self._env_desc_llm:
-            self._augment_with_llm_role1()
+            self._augment_with_llm_role1(real_buffer=real_buffer_for_fpr,
+                                          fpr_threshold=fpr_threshold)
 
     def _init_gravity_cheetah(self):
         """
@@ -246,10 +248,27 @@ class ConstraintSystem:
                 return False  # eval failure ⇒ treat as feasible (conservative)
         return check_fn
 
-    def _augment_with_llm_role1(self):
-        """Ask Claude for extra env-specific constraints and register them."""
+    def _augment_with_llm_role1(self, real_buffer=None, fpr_threshold: float = 0.01):
+        """Ask Claude for extra env-specific constraints and register them.
+
+        ``real_buffer``, when supplied, is a tuple ``(s, a, s_next, r)``
+        of arrays from real-env transitions.  Each LLM-proposed predicate
+        is evaluated on these transitions; the predicate's empirical
+        false-positive rate (= fraction of real transitions it incorrectly
+        flags as violations) must be below ``fpr_threshold`` for the
+        constraint to be accepted.  If ``real_buffer`` is None, the FPR
+        check is skipped (and we log this loudly so the paper can be
+        accurate about which configurations are FPR-validated).
+        """
         self._log("  [LLM Role #1] querying Claude for additional constraints ...")
         proposals = self._claude_oracle.role1_initial_constraints(self._env_desc_llm)
+        if real_buffer is None:
+            self._log("    ⚠ no real-buffer supplied: FPR validation SKIPPED")
+        else:
+            self._log(f"    FPR validation enabled (threshold={fpr_threshold:.3f}) "
+                      f"on {len(real_buffer[0])} real transitions")
+
+        rejected_fpr = 0
         for c in proposals or []:
             self._llm_role1_proposed += 1
             name = c.get("name", "llm_unnamed")
@@ -259,6 +278,33 @@ class ConstraintSystem:
             if fn is None:
                 self._log(f"    ✗ rejected (unsafe/syntax): {name}  {check_expr[:60]}")
                 continue
+
+            # FPR validation: count how often this predicate would flag
+            # an actual real-env transition as a constraint violation.
+            # A high FPR means the constraint is too aggressive (would
+            # reject good rollouts during training).
+            if real_buffer is not None:
+                try:
+                    s_arr, a_arr, sn_arr, r_arr = real_buffer
+                    n_total = len(s_arr)
+                    n_flag = 0
+                    # Sample at most 5000 transitions to keep validation fast.
+                    import numpy as np
+                    n_eval = min(5000, n_total)
+                    idx = np.random.default_rng(0).choice(n_total, n_eval, replace=False)
+                    for i in idx:
+                        if fn(s_arr[i], a_arr[i], sn_arr[i], float(r_arr[i])):
+                            n_flag += 1
+                    fpr = n_flag / max(1, n_eval)
+                    if fpr > fpr_threshold:
+                        rejected_fpr += 1
+                        self._log(f"    ✗ rejected (FPR={fpr:.3%} > {fpr_threshold:.3%}): "
+                                  f"{name}  {check_expr[:60]}")
+                        continue
+                except Exception as e:
+                    self._log(f"    ⚠ FPR check failed on {name}: {e}; accepting "
+                              f"by default (less safe)")
+
             self.constraints.append(Constraint(
                 name=f"llm1_{name}", description=f"{check_expr}  // {why[:80]}",
                 check_fn=fn, source="llm1",
@@ -271,8 +317,8 @@ class ConstraintSystem:
             })
             self._log(f"    + {name}: {check_expr[:70]}")
         self._log(f"  [LLM Role #1] accepted {self._llm_role1_accepted}/"
-                  f"{self._llm_role1_proposed}; total constraints now "
-                  f"{len(self.constraints)}")
+                  f"{self._llm_role1_proposed}; rejected_fpr={rejected_fpr}; "
+                  f"total constraints now {len(self.constraints)}")
 
     def _llm_role3_extend(self, suspicious_states, suspicious_actions,
                            suspicious_corr, step: int):
